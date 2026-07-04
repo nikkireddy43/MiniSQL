@@ -28,6 +28,8 @@ add_library(minisql_core
     src/lexer/Lexer.cpp
     src/lexer/Token.cpp
     src/parser/Parser.cpp
+    src/storage/Page.cpp
+    src/storage/DiskManager.cpp
 )
 target_include_directories(minisql_core PUBLIC src)
 
@@ -39,6 +41,7 @@ target_link_libraries(minisql PRIVATE minisql_core)
 add_executable(minisql_tests
     tests/lexer_test.cpp
     tests/parser_test.cpp
+    tests/storage_test.cpp
 )
 target_link_libraries(minisql_tests PRIVATE minisql_core GTest::gtest_main)
 
