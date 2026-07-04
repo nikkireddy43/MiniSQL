@@ -30,6 +30,7 @@ add_library(minisql_core
     src/parser/Parser.cpp
     src/storage/Page.cpp
     src/storage/DiskManager.cpp
+    src/catalog/Catalog.cpp
 )
 target_include_directories(minisql_core PUBLIC src)
 
@@ -42,6 +43,7 @@ add_executable(minisql_tests
     tests/lexer_test.cpp
     tests/parser_test.cpp
     tests/storage_test.cpp
+    tests/catalog_test.cpp
 )
 target_link_libraries(minisql_tests PRIVATE minisql_core GTest::gtest_main)
 
