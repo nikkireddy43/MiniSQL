@@ -18,6 +18,9 @@ namespace minisql {
 struct TableSchema {
     std::string tableName;
     std::vector<ColumnDefinition> columns;
+    // Which pages (in the shared data file) hold this table's rows.
+    // Populated by the Execution Engine as it allocates pages for INSERTs.
+    std::vector<int32_t> pageIds;
 };
 
 class CatalogError : public std::runtime_error {
@@ -53,23 +56,28 @@ public:
 
     std::vector<std::string> listTableNames() const;
 
-    // --- THE CORE METHODS - see the detailed guidance above each one ---
+    // Registers a newly-allocated data page as belonging to `tableName`,
+    // and persists the change. Called by the Execution Engine whenever
+    // it needs to allocate a new page for a table's rows (at CREATE TABLE
+    // time for the first page, or later if a page fills up).
+    void addPageToTable(const std::string& tableName, int32_t pageId);
+
+    // --- THE CORE METHODS - layout now includes pageIds (see below) ---
 
     // Encodes a TableSchema into a single flat Record, using the layout:
     //   [0] TEXT  tableName
     //   [1] INT   columnCount (n)
-    //   [2..]     for each of the n columns, TWO consecutive Values:
-    //               TEXT columnName
-    //               INT  columnType   (cast the ColumnType enum to int32_t)
+    //   [2..]     n columns, each as TWO consecutive Values:
+    //               TEXT columnName, INT columnType
+    //   [2+2n]    INT   pageCount (p)
+    //   [2+2n+1..] p page IDs, each as one INT Value
     //
-    // This reuses Value::makeText/makeInt - no new byte-packing, you're
-    // just choosing how to represent a TableSchema as a list of Values.
+    // This is an ADDITIVE extension to the layout you already built -
+    // everything up through the columns is unchanged, we're just
+    // appending the page list at the end.
     static Record encodeSchema(const TableSchema& schema);
 
-    // The exact inverse of encodeSchema - reads a Record built in that
-    // layout and reconstructs the TableSchema. Remember record[1].intVal
-    // tells you how many columns to expect, and each column occupies
-    // TWO consecutive slots (name, then type) in the record.
+    // The inverse of encodeSchema, now also reading the trailing page list.
     static TableSchema decodeSchema(const Record& record);
 
     // Reads every record from page 0 (if the catalog file has any pages

@@ -1,0 +1,264 @@
+#include "executor/Executor.h"
+
+#include "storage/Page.h"
+
+namespace minisql {
+
+Executor::Executor(CatalogManager& catalog, DiskManager& dataDisk)
+    : catalog_(catalog), dataDisk_(dataDisk) {}
+
+ExecutionResult Executor::execute(Statement* stmt) {
+    switch (stmt->type) {
+        case StatementType::CREATE_TABLE:
+            return executeCreateTable(static_cast<CreateTableStatement*>(stmt));
+        case StatementType::INSERT:
+            return executeInsert(static_cast<InsertStatement*>(stmt));
+        case StatementType::SELECT:
+            return executeSelect(static_cast<SelectStatement*>(stmt));
+        case StatementType::UPDATE:
+            return executeUpdate(static_cast<UpdateStatement*>(stmt));
+        case StatementType::DELETE:
+            return executeDelete(static_cast<DeleteStatement*>(stmt));
+        case StatementType::DROP_TABLE:
+            return executeDropTable(static_cast<DropTableStatement*>(stmt));
+    }
+    throw ExecutionError("Unknown statement type");
+}
+
+ExecutionResult Executor::executeCreateTable(CreateTableStatement* stmt) {
+    catalog_.createTable(stmt->tableName, stmt->columns);
+    int32_t pageId = dataDisk_.allocatePage();
+    catalog_.addPageToTable(stmt->tableName, pageId);
+    ExecutionResult result;
+    result.message = "Table '" + stmt->tableName + "' created.";
+    return result;
+}
+
+ExecutionResult Executor::executeDropTable(DropTableStatement* stmt) {
+    catalog_.dropTable(stmt->tableName);
+    ExecutionResult result;
+    result.message = "Table '" + stmt->tableName + "' dropped.";
+    return result;
+}
+
+std::vector<Record> Executor::gatherAllRows(DiskManager& disk, const TableSchema& schema) {
+    std::vector<Record> allRows;
+    for (int32_t pageId : schema.pageIds) {
+        Page page;
+        disk.readPage(pageId, page);
+        auto pageRecords = page.getAllRecords();
+        allRows.insert(allRows.end(), pageRecords.begin(), pageRecords.end());
+    }
+    return allRows;
+}
+
+void Executor::rewriteTableRows(CatalogManager& catalog, DiskManager& disk,
+                                 const std::string& tableName, const std::vector<Record>& rows) {
+    std::vector<int32_t> pageIds = catalog.getTable(tableName).pageIds;
+    size_t pageIdx = 0;
+    Page currentPage;
+
+    auto flushCurrentPage = [&]() {
+        if (pageIdx < pageIds.size()) {
+            disk.writePage(pageIds[pageIdx], currentPage);
+        } else {
+            int32_t newPageId = disk.allocatePage();
+            disk.writePage(newPageId, currentPage);
+            catalog.addPageToTable(tableName, newPageId);
+            pageIds.push_back(newPageId);
+        }
+        pageIdx++;
+        currentPage = Page();
+    };
+
+    for (const Record& row : rows) {
+        if (!currentPage.appendRecord(row)) {
+            flushCurrentPage();
+            if (!currentPage.appendRecord(row)) {
+                throw ExecutionError("Row too large to fit in a single page");
+            }
+        }
+    }
+    flushCurrentPage();
+
+    for (; pageIdx < pageIds.size(); pageIdx++) {
+        Page empty;
+        disk.writePage(pageIds[pageIdx], empty);
+    }
+}
+
+ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
+    const TableSchema& schema = catalog_.getTable(stmt->tableName);
+
+    Record record;
+    record.reserve(schema.columns.size());
+    for (size_t i = 0; i < schema.columns.size(); ++i) {
+        record.push_back(literalToValue(stmt->values[i], schema.columns[i].type));
+    }
+
+    Page page;
+    const int32_t lastPageId = schema.pageIds.back();
+    dataDisk_.readPage(lastPageId, page);
+
+    if (page.appendRecord(record)) {
+        dataDisk_.writePage(lastPageId, page);
+    } else {
+        const int32_t newPageId = dataDisk_.allocatePage();
+        Page newPage;
+        newPage.appendRecord(record);
+        dataDisk_.writePage(newPageId, newPage);
+        catalog_.addPageToTable(stmt->tableName, newPageId);
+    }
+
+    ExecutionResult result;
+    result.message = "1 row inserted.";
+    return result;
+}
+
+ExecutionResult Executor::executeSelect(SelectStatement* stmt) {
+    const TableSchema& schema = catalog_.getTable(stmt->tableName);
+
+    std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
+
+    std::vector<Record> matched;
+    for (const Record& row : allRows) {
+        if (!stmt->whereClause.has_value()
+            || evaluateCondition(row, schema, stmt->whereClause.value())) {
+            matched.push_back(row);
+        }
+    }
+
+    ExecutionResult result;
+    if (stmt->selectAll) {
+        result.columnNames.reserve(schema.columns.size());
+        for (const ColumnDefinition& col : schema.columns) {
+            result.columnNames.push_back(col.name);
+        }
+        result.rows = std::move(matched);
+    } else {
+        result.columnNames = stmt->columns;
+        result.rows.reserve(matched.size());
+        for (const Record& row : matched) {
+            Record projected;
+            projected.reserve(stmt->columns.size());
+            for (const std::string& colName : stmt->columns) {
+                size_t colIndex = 0;
+                for (; colIndex < schema.columns.size(); ++colIndex) {
+                    if (schema.columns[colIndex].name == colName) break;
+                }
+                if (colIndex == schema.columns.size()) {
+                    throw ExecutionError("Unknown column in SELECT: " + colName);
+                }
+                projected.push_back(row[colIndex]);
+            }
+            result.rows.push_back(std::move(projected));
+        }
+    }
+
+    result.message = std::to_string(result.rows.size()) + " row(s) returned.";
+    return result;
+}
+
+ExecutionResult Executor::executeUpdate(UpdateStatement* stmt) {
+    const TableSchema& schema = catalog_.getTable(stmt->tableName);
+    std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
+
+    size_t setColumnIndex = schema.columns.size();
+    for (size_t i = 0; i < schema.columns.size(); ++i) {
+        if (schema.columns[i].name == stmt->setColumn) {
+            setColumnIndex = i;
+            break;
+        }
+    }
+    if (setColumnIndex == schema.columns.size()) {
+        throw ExecutionError("Unknown column in SET clause: " + stmt->setColumn);
+    }
+
+    const ColumnType setColumnType = schema.columns[setColumnIndex].type;
+    size_t updatedCount = 0;
+
+    for (Record& row : allRows) {
+        const bool matches = !stmt->whereClause.has_value()
+            || evaluateCondition(row, schema, stmt->whereClause.value());
+        if (matches) {
+            row[setColumnIndex] = literalToValue(stmt->setValue, setColumnType);
+            updatedCount++;
+        }
+    }
+
+    rewriteTableRows(catalog_, dataDisk_, stmt->tableName, allRows);
+
+    ExecutionResult result;
+    result.message = std::to_string(updatedCount) + " row(s) updated.";
+    return result;
+}
+
+ExecutionResult Executor::executeDelete(DeleteStatement* stmt) {
+    const TableSchema& schema = catalog_.getTable(stmt->tableName);
+    std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
+
+    std::vector<Record> toKeep;
+    for (const Record& row : allRows) {
+        bool matches = stmt->whereClause.has_value()
+            && evaluateCondition(row, schema, stmt->whereClause.value());
+        if (!stmt->whereClause.has_value()) matches = true;
+        if (!matches) toKeep.push_back(row);
+    }
+
+    rewriteTableRows(catalog_, dataDisk_, stmt->tableName, toKeep);
+
+    ExecutionResult result;
+    result.message = std::to_string(allRows.size() - toKeep.size()) + " row(s) deleted.";
+    return result;
+}
+
+Value Executor::literalToValue(const Literal& literal, ColumnType expectedType) {
+    switch (expectedType) {
+        case ColumnType::INT: return Value::makeInt(std::stoi(literal.text));
+        case ColumnType::FLOAT: return Value::makeFloat(std::stod(literal.text));
+        case ColumnType::TEXT: return Value::makeText(literal.text);
+    }
+    throw ExecutionError("Unknown column type in literalToValue()");
+}
+
+bool Executor::evaluateCondition(const Record& record, const TableSchema& schema,
+                                  const Condition& condition) {
+    int columnIndex = -1;
+    for (size_t i = 0; i < schema.columns.size(); i++) {
+        if (schema.columns[i].name == condition.column) {
+            columnIndex = static_cast<int>(i);
+            break;
+        }
+    }
+    if (columnIndex == -1) {
+        throw ExecutionError("Unknown column in WHERE clause: " + condition.column);
+    }
+
+    const Value& fieldValue = record[static_cast<size_t>(columnIndex)];
+    Value compareValue = literalToValue(condition.value, schema.columns[columnIndex].type);
+
+    int cmp = 0;
+    switch (fieldValue.type) {
+        case ValueType::INT:
+            cmp = (fieldValue.intVal > compareValue.intVal) - (fieldValue.intVal < compareValue.intVal);
+            break;
+        case ValueType::FLOAT:
+            cmp = (fieldValue.floatVal > compareValue.floatVal) - (fieldValue.floatVal < compareValue.floatVal);
+            break;
+        case ValueType::TEXT:
+            cmp = fieldValue.textVal.compare(compareValue.textVal);
+            break;
+    }
+
+    switch (condition.op) {
+        case TokenType::EQUAL: return cmp == 0;
+        case TokenType::NOT_EQUAL: return cmp != 0;
+        case TokenType::LESS: return cmp < 0;
+        case TokenType::LESS_EQUAL: return cmp <= 0;
+        case TokenType::GREATER: return cmp > 0;
+        case TokenType::GREATER_EQUAL: return cmp >= 0;
+        default: throw ExecutionError("Unsupported operator in WHERE clause");
+    }
+}
+
+}  // namespace minisql

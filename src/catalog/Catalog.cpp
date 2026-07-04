@@ -9,8 +9,6 @@ CatalogManager::CatalogManager(const std::string& catalogFilePath) {
     loadFromDisk();
 }
 
-// ---------- Map operations (already implemented for you) ----------
-
 void CatalogManager::createTable(const std::string& tableName,
                                   const std::vector<ColumnDefinition>& columns) {
     if (tableExists(tableName)) {
@@ -52,36 +50,28 @@ std::vector<std::string> CatalogManager::listTableNames() const {
     return names;
 }
 
-// ---------- Core logic (YOUR TURN - see Catalog.h for detailed guidance) ----------
-//
-// Suggested build order:
-//   1. encodeSchema  - build a Record from a TableSchema. Pure in-memory,
-//      no disk involved, easiest to reason about first.
-//   2. decodeSchema  - the exact inverse.
-//   3. persistAll    - uses encodeSchema + Page::appendRecord + DiskManager.
-//   4. loadFromDisk  - uses decodeSchema + Page::getAllRecords + DiskManager.
-
 Record CatalogManager::encodeSchema(const TableSchema& schema) {
     Record record;
-
     record.push_back(Value::makeText(schema.tableName));
     record.push_back(Value::makeInt(static_cast<int32_t>(schema.columns.size())));
-
     for (const ColumnDefinition& col : schema.columns) {
         record.push_back(Value::makeText(col.name));
         record.push_back(Value::makeInt(static_cast<int32_t>(col.type)));
     }
-
+    // NEW: append the page list - same pattern as the column list above,
+    // a count followed by that many values.
+    record.push_back(Value::makeInt(static_cast<int32_t>(schema.pageIds.size())));
+    for (int32_t pageId : schema.pageIds) {
+        record.push_back(Value::makeInt(pageId));
+    }
     return record;
 }
 
 TableSchema CatalogManager::decodeSchema(const Record& record) {
     TableSchema schema;
     schema.tableName = record[0].textVal;
-
     const int32_t columnCount = record[1].intVal;
     schema.columns.reserve(static_cast<size_t>(columnCount));
-
     for (int32_t i = 0; i < columnCount; ++i) {
         const size_t idx = 2 + static_cast<size_t>(i) * 2;
         ColumnDefinition col;
@@ -90,7 +80,23 @@ TableSchema CatalogManager::decodeSchema(const Record& record) {
         schema.columns.push_back(std::move(col));
     }
 
+    // NEW: read the trailing page list, right after the columns.
+    const size_t pageCountIdx = 2 + static_cast<size_t>(columnCount) * 2;
+    const int32_t pageCount = record[pageCountIdx].intVal;
+    schema.pageIds.reserve(static_cast<size_t>(pageCount));
+    for (int32_t i = 0; i < pageCount; ++i) {
+        schema.pageIds.push_back(record[pageCountIdx + 1 + static_cast<size_t>(i)].intVal);
+    }
+
     return schema;
+}
+
+void CatalogManager::addPageToTable(const std::string& tableName, int32_t pageId) {
+    if (!tableExists(tableName)) {
+        throw CatalogError("Table does not exist: " + tableName);
+    }
+    tables_[tableName].pageIds.push_back(pageId);
+    persistAll();
 }
 
 void CatalogManager::persistAll() {
@@ -107,8 +113,6 @@ void CatalogManager::persistAll() {
 }
 
 void CatalogManager::loadFromDisk() {
-    // Base case already handled for you: a brand new catalog file has no
-    // pages yet, so there's nothing to load.
     if (diskManager_->numPages() == 0) {
         return;
     }
