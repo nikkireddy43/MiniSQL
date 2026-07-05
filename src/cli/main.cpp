@@ -7,6 +7,7 @@
 #include "lexer/Lexer.h"
 #include "parser/Parser.h"
 #include "executor/Executor.h"
+#include "wal/WriteAheadLog.h"
 
 using namespace minisql;
 
@@ -107,10 +108,20 @@ static void runBenchmark(Executor& executor) {
 int main() {
     std::string catalogPath = "minisql_catalog.db";
     std::string dataPath = "minisql_data.db";
+    std::string walPath = "minisql.wal";
+
     CatalogManager catalog(catalogPath);
     DiskManager dataDisk(dataPath);
+
+    // Replay any log entries left over from a prior run that crashed
+    // before its real page writes completed - MUST happen before the
+    // buffer pool starts caching pages, so recovery writes land on the
+    // actual file first.
+    WriteAheadLog::recover(walPath, dataDisk);
+
+    WriteAheadLog wal(walPath);
     BufferPool bufferPool(dataDisk, /*poolSize=*/64);
-    Executor executor(catalog, bufferPool, dataPath, catalogPath);
+    Executor executor(catalog, bufferPool, wal, dataPath, catalogPath);
 
     std::cout << "MiniSQL v1\n";
     std::cout << "Type SQL statements ending in ';' (including BEGIN/COMMIT/"
@@ -160,6 +171,7 @@ int main() {
         buffer.clear();
     }
 
+    executor.checkpoint();  // flush everything for real and clear the WAL log
     std::cout << "Goodbye.\n";
     return 0;
 }

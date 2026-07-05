@@ -5,6 +5,7 @@
 #include "parser/Parser.h"
 #include "buffer/BufferPool.h"
 #include "executor/Executor.h"
+#include "wal/WriteAheadLog.h"
 
 using namespace minisql;
 
@@ -12,21 +13,25 @@ class TransactionTest : public ::testing::Test {
 protected:
     std::string catalogFile = "test_minisql_txn_catalog.db";
     std::string dataFile = "test_minisql_txn_data.db";
+    std::string walFile = "test_minisql_txn.wal";
     std::unique_ptr<CatalogManager> catalog;
     std::unique_ptr<DiskManager> dataDisk;
     std::unique_ptr<BufferPool> bufferPool;
+    std::unique_ptr<WriteAheadLog> wal;
     std::unique_ptr<Executor> executor;
 
     void SetUp() override {
         catalog = std::make_unique<CatalogManager>(catalogFile);
         dataDisk = std::make_unique<DiskManager>(dataFile);
+        wal = std::make_unique<WriteAheadLog>(walFile);
         bufferPool = std::make_unique<BufferPool>(*dataDisk, 64);
-        executor = std::make_unique<Executor>(*catalog, *bufferPool, dataFile, catalogFile);
+        executor = std::make_unique<Executor>(*catalog, *bufferPool, *wal, dataFile, catalogFile);
     }
 
     void TearDown() override {
         std::remove(catalogFile.c_str());
         std::remove(dataFile.c_str());
+        std::remove(walFile.c_str());
         std::remove((catalogFile + ".snapshot").c_str());
         std::remove((dataFile + ".snapshot").c_str());
     }

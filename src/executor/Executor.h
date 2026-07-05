@@ -10,6 +10,7 @@
 #include "index/BTree.h"
 #include "parser/AST.h"
 #include "storage/Value.h"
+#include "wal/WriteAheadLog.h"
 
 namespace minisql {
 
@@ -37,7 +38,7 @@ struct ExecutionResult {
 // would do it at scale, but a legitimate, explainable v1 tradeoff.
 class Executor {
 public:
-    Executor(CatalogManager& catalog, BufferPool& bufferPool,
+    Executor(CatalogManager& catalog, BufferPool& bufferPool, WriteAheadLog& wal,
              std::string dataFilePath, std::string catalogFilePath);
 
     // Dispatches based on stmt->type to the matching executeX() method.
@@ -118,6 +119,14 @@ public:
     // Executor.cpp.
     ExecutionResult executeRollback(RollbackStatement* stmt);
 
+    // Writes every dirty page in the buffer pool to disk for real, then
+    // clears the WAL log - once every logged write is confirmed durable
+    // in the data file itself, the log entries are redundant. Call this
+    // on a clean shutdown (or periodically) to keep the log from growing
+    // forever; skipping it just means recover() has more to replay next
+    // time, which is still correct, just slower to catch up.
+    void checkpoint();
+
     // --- Helpers (already implemented for you) ---
 
     // Converts a parsed Literal (raw text, e.g. "8.7") into a typed Value,
@@ -146,6 +155,7 @@ public:
 private:
     CatalogManager& catalog_;
     BufferPool& bufferPool_;
+    WriteAheadLog& wal_;
     std::string dataFilePath_;
     std::string catalogFilePath_;
     bool inTransaction_ = false;
@@ -179,7 +189,7 @@ private:
     // an empty Page if fewer pages are needed now than before. Without
     // that last step, stale records from before the rewrite would still
     // be sitting in those pages and would resurface on a later read.
-    static void rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool,
+    static void rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool, WriteAheadLog& wal,
                                   const std::string& tableName, const std::vector<Record>& rows);
 };
 

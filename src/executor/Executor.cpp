@@ -6,9 +6,9 @@
 
 namespace minisql {
 
-Executor::Executor(CatalogManager& catalog, BufferPool& bufferPool,
+Executor::Executor(CatalogManager& catalog, BufferPool& bufferPool, WriteAheadLog& wal,
                     std::string dataFilePath, std::string catalogFilePath)
-    : catalog_(catalog), bufferPool_(bufferPool),
+    : catalog_(catalog), bufferPool_(bufferPool), wal_(wal),
       dataFilePath_(std::move(dataFilePath)), catalogFilePath_(std::move(catalogFilePath)) {}
 
 ExecutionResult Executor::execute(Statement* stmt) {
@@ -159,6 +159,11 @@ ExecutionResult Executor::executeRollback(RollbackStatement*) {
     return result;
 }
 
+void Executor::checkpoint() {
+    bufferPool_.flushAllPages();
+    wal_.clear();
+}
+
 std::vector<Record> Executor::gatherAllRows(BufferPool& bufferPool, const TableSchema& schema) {
     std::vector<Record> allRows;
     for (int32_t pageId : schema.pageIds) {
@@ -170,7 +175,7 @@ std::vector<Record> Executor::gatherAllRows(BufferPool& bufferPool, const TableS
     return allRows;
 }
 
-void Executor::rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool,
+void Executor::rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool, WriteAheadLog& wal,
                                  const std::string& tableName, const std::vector<Record>& rows) {
     std::vector<int32_t> pageIds = catalog.getTable(tableName).pageIds;
     size_t pageIdx = 0;
@@ -193,6 +198,10 @@ void Executor::rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool,
         }
 
         *cached = currentPage;
+        // Log the write BEFORE unpinning, while `cached` is still valid -
+        // this is what makes the write durable now, instead of an eager
+        // full-pool flush after every statement.
+        wal.logPageWrite(targetPageId, *cached);
         bufferPool.unpinPage(targetPageId, true);
 
         if (isNewPage) {
@@ -217,12 +226,14 @@ void Executor::rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool,
     for (; pageIdx < pageIds.size(); pageIdx++) {
         Page* cached = bufferPool.fetchPage(pageIds[pageIdx]);
         *cached = Page();
+        wal.logPageWrite(pageIds[pageIdx], *cached);
         bufferPool.unpinPage(pageIds[pageIdx], true);
     }
 
-    // No WAL yet - flush now so the rewrite is actually durable rather
-    // than sitting dirty-in-memory until some future eviction.
-    bufferPool.flushAllPages();
+    // No eager flushAllPages() here anymore - the WAL entries above are
+    // what guarantee durability now. The buffer pool is free to keep
+    // these pages cached and defer the real disk write to whenever a
+    // frame naturally gets evicted or checkpoint() is called.
 }
 
 // ---------- Index support ----------
@@ -302,12 +313,14 @@ ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
     size_t newRecordIndex = page->numRecords();  // capture BEFORE appending
 
     if (page->appendRecord(record)) {
+        wal_.logPageWrite(targetPageId, *page);  // durable via the log now, not an eager flush
         bufferPool_.unpinPage(targetPageId, true);
     } else {
         bufferPool_.unpinPage(targetPageId, false);  // unmodified, roll back the pin cleanly
         Page* newPagePtr = bufferPool_.newPage(targetPageId);
         newRecordIndex = 0;
         newPagePtr->appendRecord(record);
+        wal_.logPageWrite(targetPageId, *newPagePtr);
         bufferPool_.unpinPage(targetPageId, true);
         catalog_.addPageToTable(stmt->tableName, targetPageId);
     }
@@ -326,8 +339,6 @@ ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
                 key, RowLocation{targetPageId, newRecordIndex});
         }
     }
-
-    bufferPool_.flushAllPages();  // no WAL yet - keep writes durable for now
 
     ExecutionResult result;
     result.message = "1 row inserted.";
@@ -418,7 +429,7 @@ ExecutionResult Executor::executeUpdate(UpdateStatement* stmt) {
         }
     }
 
-    rewriteTableRows(catalog_, bufferPool_, stmt->tableName, allRows);
+    rewriteTableRows(catalog_, bufferPool_, wal_, stmt->tableName, allRows);
     rebuildIndexesForTable(stmt->tableName);
 
     ExecutionResult result;
@@ -438,7 +449,7 @@ ExecutionResult Executor::executeDelete(DeleteStatement* stmt) {
         if (!matches) toKeep.push_back(row);
     }
 
-    rewriteTableRows(catalog_, bufferPool_, stmt->tableName, toKeep);
+    rewriteTableRows(catalog_, bufferPool_, wal_, stmt->tableName, toKeep);
     rebuildIndexesForTable(stmt->tableName);
 
     ExecutionResult result;
