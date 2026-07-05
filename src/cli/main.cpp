@@ -3,6 +3,7 @@
 #include <sstream>
 #include <string>
 
+#include "buffer/BufferPool.h"
 #include "lexer/Lexer.h"
 #include "parser/Parser.h"
 #include "executor/Executor.h"
@@ -106,7 +107,8 @@ static void runBenchmark(Executor& executor) {
 int main() {
     CatalogManager catalog("minisql_catalog.db");
     DiskManager dataDisk("minisql_data.db");
-    Executor executor(catalog, dataDisk);
+    BufferPool bufferPool(dataDisk, /*poolSize=*/64);
+    Executor executor(catalog, bufferPool);
 
     std::cout << "MiniSQL v1\n";
     std::cout << "Type SQL statements ending in ';', BENCHMARK to run the "

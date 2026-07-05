@@ -4,8 +4,8 @@
 
 namespace minisql {
 
-Executor::Executor(CatalogManager& catalog, DiskManager& dataDisk)
-    : catalog_(catalog), dataDisk_(dataDisk) {}
+Executor::Executor(CatalogManager& catalog, BufferPool& bufferPool)
+    : catalog_(catalog), bufferPool_(bufferPool) {}
 
 ExecutionResult Executor::execute(Statement* stmt) {
     switch (stmt->type) {
@@ -29,8 +29,12 @@ ExecutionResult Executor::execute(Statement* stmt) {
 
 ExecutionResult Executor::executeCreateTable(CreateTableStatement* stmt) {
     catalog_.createTable(stmt->tableName, stmt->columns);
-    int32_t pageId = dataDisk_.allocatePage();
+
+    int32_t pageId;
+    bufferPool_.newPage(pageId);
+    bufferPool_.unpinPage(pageId, false);  // freshly allocated page already matches disk
     catalog_.addPageToTable(stmt->tableName, pageId);
+
     ExecutionResult result;
     result.message = "Table '" + stmt->tableName + "' created.";
     return result;
@@ -43,31 +47,44 @@ ExecutionResult Executor::executeDropTable(DropTableStatement* stmt) {
     return result;
 }
 
-std::vector<Record> Executor::gatherAllRows(DiskManager& disk, const TableSchema& schema) {
+std::vector<Record> Executor::gatherAllRows(BufferPool& bufferPool, const TableSchema& schema) {
     std::vector<Record> allRows;
     for (int32_t pageId : schema.pageIds) {
-        Page page;
-        disk.readPage(pageId, page);
-        auto pageRecords = page.getAllRecords();
+        Page* page = bufferPool.fetchPage(pageId);
+        auto pageRecords = page->getAllRecords();
+        bufferPool.unpinPage(pageId, false);  // read-only, not modified
         allRows.insert(allRows.end(), pageRecords.begin(), pageRecords.end());
     }
     return allRows;
 }
 
-void Executor::rewriteTableRows(CatalogManager& catalog, DiskManager& disk,
+void Executor::rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool,
                                  const std::string& tableName, const std::vector<Record>& rows) {
     std::vector<int32_t> pageIds = catalog.getTable(tableName).pageIds;
     size_t pageIdx = 0;
     Page currentPage;
 
+    // Writes `currentPage` into either an existing page slot (reusing the
+    // table's current pageIds first) or a newly allocated one, then resets
+    // currentPage for the next batch of rows.
     auto flushCurrentPage = [&]() {
-        if (pageIdx < pageIds.size()) {
-            disk.writePage(pageIds[pageIdx], currentPage);
+        bool isNewPage = (pageIdx >= pageIds.size());
+        int32_t targetPageId;
+        Page* cached;
+
+        if (!isNewPage) {
+            targetPageId = pageIds[pageIdx];
+            cached = bufferPool.fetchPage(targetPageId);
         } else {
-            int32_t newPageId = disk.allocatePage();
-            disk.writePage(newPageId, currentPage);
-            catalog.addPageToTable(tableName, newPageId);
-            pageIds.push_back(newPageId);
+            cached = bufferPool.newPage(targetPageId);
+            pageIds.push_back(targetPageId);
+        }
+
+        *cached = currentPage;
+        bufferPool.unpinPage(targetPageId, true);
+
+        if (isNewPage) {
+            catalog.addPageToTable(tableName, targetPageId);
         }
         pageIdx++;
         currentPage = Page();
@@ -81,15 +98,22 @@ void Executor::rewriteTableRows(CatalogManager& catalog, DiskManager& disk,
             }
         }
     }
-    flushCurrentPage();
+    flushCurrentPage();  // flush the final (possibly partial, possibly empty) page
 
+    // Clear any pages that existed before but aren't needed anymore -
+    // otherwise their old contents would resurface on a future read.
     for (; pageIdx < pageIds.size(); pageIdx++) {
-        Page empty;
-        disk.writePage(pageIds[pageIdx], empty);
+        Page* cached = bufferPool.fetchPage(pageIds[pageIdx]);
+        *cached = Page();
+        bufferPool.unpinPage(pageIds[pageIdx], true);
     }
+
+    // No WAL yet - flush now so the rewrite is actually durable rather
+    // than sitting dirty-in-memory until some future eviction.
+    bufferPool.flushAllPages();
 }
 
-// ---------- Index support (already implemented for you) ----------
+// ---------- Index support ----------
 
 std::string Executor::indexKey(const std::string& tableName, const std::string& columnName) {
     return tableName + "." + columnName;
@@ -119,9 +143,9 @@ BPlusTree Executor::buildIndexFromScan(const std::string& tableName, const std::
 
     BPlusTree tree;
     for (int32_t pageId : schema.pageIds) {
-        Page page;
-        dataDisk_.readPage(pageId, page);
-        auto records = page.getAllRecords();
+        Page* page = bufferPool_.fetchPage(pageId);
+        auto records = page->getAllRecords();
+        bufferPool_.unpinPage(pageId, false);
         for (size_t recordIndex = 0; recordIndex < records.size(); recordIndex++) {
             int32_t key = records[recordIndex][colIndex].intVal;
             tree.insert(key, RowLocation{pageId, recordIndex});
@@ -132,7 +156,7 @@ BPlusTree Executor::buildIndexFromScan(const std::string& tableName, const std::
 
 void Executor::rebuildIndexesForTable(const std::string& tableName) {
     auto it = indexedColumnsByTable_.find(tableName);
-    if (it == indexedColumnsByTable_.end()) return;  // no indexes on this table
+    if (it == indexedColumnsByTable_.end()) return;
 
     for (const std::string& columnName : it->second) {
         indexes_[indexKey(tableName, columnName)] = buildIndexFromScan(tableName, columnName);
@@ -161,19 +185,18 @@ ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
         record.push_back(literalToValue(stmt->values[i], schema.columns[i].type));
     }
 
-    Page page;
     int32_t targetPageId = schema.pageIds.back();
-    dataDisk_.readPage(targetPageId, page);
-    size_t newRecordIndex = page.numRecords();  // capture BEFORE appending
+    Page* page = bufferPool_.fetchPage(targetPageId);
+    size_t newRecordIndex = page->numRecords();  // capture BEFORE appending
 
-    if (page.appendRecord(record)) {
-        dataDisk_.writePage(targetPageId, page);
+    if (page->appendRecord(record)) {
+        bufferPool_.unpinPage(targetPageId, true);
     } else {
-        targetPageId = dataDisk_.allocatePage();
-        Page newPage;
+        bufferPool_.unpinPage(targetPageId, false);  // unmodified, roll back the pin cleanly
+        Page* newPagePtr = bufferPool_.newPage(targetPageId);
         newRecordIndex = 0;
-        newPage.appendRecord(record);
-        dataDisk_.writePage(targetPageId, newPage);
+        newPagePtr->appendRecord(record);
+        bufferPool_.unpinPage(targetPageId, true);
         catalog_.addPageToTable(stmt->tableName, targetPageId);
     }
 
@@ -192,6 +215,8 @@ ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
         }
     }
 
+    bufferPool_.flushAllPages();  // no WAL yet - keep writes durable for now
+
     ExecutionResult result;
     result.message = "1 row inserted.";
     return result;
@@ -208,13 +233,13 @@ ExecutionResult Executor::executeSelect(SelectStatement* stmt) {
         int32_t key = std::stoi(stmt->whereClause->value.text);
         auto location = indexes_[indexKey(stmt->tableName, stmt->whereClause->column)].search(key);
         if (location.has_value()) {
-            Page page;
-            dataDisk_.readPage(location->pageId, page);
-            auto records = page.getAllRecords();
+            Page* page = bufferPool_.fetchPage(location->pageId);
+            auto records = page->getAllRecords();
+            bufferPool_.unpinPage(location->pageId, false);
             matched.push_back(records[location->recordIndex]);
         }
     } else {
-        std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
+        std::vector<Record> allRows = gatherAllRows(bufferPool_, schema);
         for (const Record& row : allRows) {
             if (!stmt->whereClause.has_value()
                 || evaluateCondition(row, schema, stmt->whereClause.value())) {
@@ -256,7 +281,7 @@ ExecutionResult Executor::executeSelect(SelectStatement* stmt) {
 
 ExecutionResult Executor::executeUpdate(UpdateStatement* stmt) {
     const TableSchema& schema = catalog_.getTable(stmt->tableName);
-    std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
+    std::vector<Record> allRows = gatherAllRows(bufferPool_, schema);
 
     size_t setColumnIndex = schema.columns.size();
     for (size_t i = 0; i < schema.columns.size(); ++i) {
@@ -281,8 +306,8 @@ ExecutionResult Executor::executeUpdate(UpdateStatement* stmt) {
         }
     }
 
-    rewriteTableRows(catalog_, dataDisk_, stmt->tableName, allRows);
-    rebuildIndexesForTable(stmt->tableName);  // row locations changed - indexes are now stale
+    rewriteTableRows(catalog_, bufferPool_, stmt->tableName, allRows);
+    rebuildIndexesForTable(stmt->tableName);
 
     ExecutionResult result;
     result.message = std::to_string(updatedCount) + " row(s) updated.";
@@ -291,7 +316,7 @@ ExecutionResult Executor::executeUpdate(UpdateStatement* stmt) {
 
 ExecutionResult Executor::executeDelete(DeleteStatement* stmt) {
     const TableSchema& schema = catalog_.getTable(stmt->tableName);
-    std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
+    std::vector<Record> allRows = gatherAllRows(bufferPool_, schema);
 
     std::vector<Record> toKeep;
     for (const Record& row : allRows) {
@@ -301,8 +326,8 @@ ExecutionResult Executor::executeDelete(DeleteStatement* stmt) {
         if (!matches) toKeep.push_back(row);
     }
 
-    rewriteTableRows(catalog_, dataDisk_, stmt->tableName, toKeep);
-    rebuildIndexesForTable(stmt->tableName);  // row locations changed - indexes are now stale
+    rewriteTableRows(catalog_, bufferPool_, stmt->tableName, toKeep);
+    rebuildIndexesForTable(stmt->tableName);
 
     ExecutionResult result;
     result.message = std::to_string(allRows.size() - toKeep.size()) + " row(s) deleted.";

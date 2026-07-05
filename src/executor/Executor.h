@@ -5,10 +5,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "buffer/BufferPool.h"
 #include "catalog/Catalog.h"
 #include "index/BTree.h"
 #include "parser/AST.h"
-#include "storage/DiskManager.h"
 #include "storage/Value.h"
 
 namespace minisql {
@@ -37,7 +37,7 @@ struct ExecutionResult {
 // would do it at scale, but a legitimate, explainable v1 tradeoff.
 class Executor {
 public:
-    Executor(CatalogManager& catalog, DiskManager& dataDisk);
+    Executor(CatalogManager& catalog, BufferPool& bufferPool);
 
     // Dispatches based on stmt->type to the matching executeX() method.
     ExecutionResult execute(Statement* stmt);
@@ -124,7 +124,7 @@ public:
 
 private:
     CatalogManager& catalog_;
-    DiskManager& dataDisk_;
+    BufferPool& bufferPool_;
 
     // Maps "table.column" -> its B+Tree.
     std::unordered_map<std::string, BPlusTree> indexes_;
@@ -146,7 +146,7 @@ private:
     void rebuildIndexesForTable(const std::string& tableName);
 
     // Reads every record across all of a table's data pages.
-    static std::vector<Record> gatherAllRows(DiskManager& disk, const TableSchema& schema);
+    static std::vector<Record> gatherAllRows(BufferPool& bufferPool, const TableSchema& schema);
 
     // Rewrites a table's ENTIRE data page set from `rows`: repacks them
     // into pages (reusing the table's existing pageIds first, allocating
@@ -155,7 +155,7 @@ private:
     // an empty Page if fewer pages are needed now than before. Without
     // that last step, stale records from before the rewrite would still
     // be sitting in those pages and would resurface on a later read.
-    static void rewriteTableRows(CatalogManager& catalog, DiskManager& disk,
+    static void rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool,
                                   const std::string& tableName, const std::vector<Record>& rows);
 };
 

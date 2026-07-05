@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "lexer/Lexer.h"
 #include "parser/Parser.h"
+#include "buffer/BufferPool.h"
 #include "executor/Executor.h"
 
 using namespace minisql;
@@ -12,12 +13,14 @@ protected:
     std::string dataFile = "test_minisql_idx_data.db";
     std::unique_ptr<CatalogManager> catalog;
     std::unique_ptr<DiskManager> dataDisk;
+    std::unique_ptr<BufferPool> bufferPool;
     std::unique_ptr<Executor> executor;
 
     void SetUp() override {
         catalog = std::make_unique<CatalogManager>(catalogFile);
         dataDisk = std::make_unique<DiskManager>(dataFile);
-        executor = std::make_unique<Executor>(*catalog, *dataDisk);
+        bufferPool = std::make_unique<BufferPool>(*dataDisk, 64);
+        executor = std::make_unique<Executor>(*catalog, *bufferPool);
     }
 
     void TearDown() override {

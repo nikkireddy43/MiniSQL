@@ -2,6 +2,7 @@
 #include <cstdio>
 #include "lexer/Lexer.h"
 #include "parser/Parser.h"
+#include "buffer/BufferPool.h"
 #include "executor/Executor.h"
 
 using namespace minisql;
@@ -12,12 +13,14 @@ protected:
     std::string dataFile = "test_minisql_exec_data.db";
     std::unique_ptr<CatalogManager> catalog;
     std::unique_ptr<DiskManager> dataDisk;
+    std::unique_ptr<BufferPool> bufferPool;
     std::unique_ptr<Executor> executor;
 
     void SetUp() override {
         catalog = std::make_unique<CatalogManager>(catalogFile);
         dataDisk = std::make_unique<DiskManager>(dataFile);
-        executor = std::make_unique<Executor>(*catalog, *dataDisk);
+        bufferPool = std::make_unique<BufferPool>(*dataDisk, 64);
+        executor = std::make_unique<Executor>(*catalog, *bufferPool);
     }
 
     void TearDown() override {
@@ -140,11 +143,12 @@ TEST_F(ExecutorTest, DataPersistsAcrossExecutorInstances) {
     run("CREATE TABLE student(id INT, name TEXT);");
     run("INSERT INTO student VALUES(1, 'Nikki');");
 
-    // Simulate a restart: fresh Catalog/DiskManager/Executor over the
-    // same files.
+    // Simulate a restart: fresh Catalog/DiskManager/BufferPool/Executor
+    // over the same files.
     catalog = std::make_unique<CatalogManager>(catalogFile);
     dataDisk = std::make_unique<DiskManager>(dataFile);
-    executor = std::make_unique<Executor>(*catalog, *dataDisk);
+    bufferPool = std::make_unique<BufferPool>(*dataDisk, 64);
+    executor = std::make_unique<Executor>(*catalog, *bufferPool);
 
     ExecutionResult result = run("SELECT * FROM student;");
     ASSERT_EQ(result.rows.size(), 1);
