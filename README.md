@@ -119,6 +119,13 @@ the index automatically when one exists for an equality condition.
 - No concurrency control - this is a single-threaded, single-connection
   engine.
 
+## Getting the code
+
+```bash
+git clone https://github.com/nikkireddy43/MiniSQL.git
+cd MiniSQL
+```
+
 ## Building
 
 Requires CMake 3.16+ and a C++17 compiler. GoogleTest is fetched
