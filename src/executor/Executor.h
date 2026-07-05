@@ -2,9 +2,11 @@
 
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "catalog/Catalog.h"
+#include "index/BTree.h"
 #include "parser/AST.h"
 #include "storage/DiskManager.h"
 #include "storage/Value.h"
@@ -61,6 +63,13 @@ public:
     //      collect all records via page.getAllRecords().
     //   2. If stmt->whereClause has a value, keep only records where
     //      evaluateCondition() (below) returns true.
+    //      *** EXCEPT: if there's a WHERE clause with operator EQUAL on
+    //      a column that has an index (check hasIndex() below), skip
+    //      the full-scan-and-filter approach entirely - instead call
+    //      indexes_[indexKey(tableName, column)].search(key) to jump
+    //      straight to the matching row's RowLocation, then read just
+    //      that one page/record. This is the actual point of this whole
+    //      phase - see hasIndex()/indexKey() below. ***
     //   3. Build columnNames for the result: if stmt->selectAll, use
     //      every column name from the schema in order; otherwise use
     //      stmt->columns as given.
@@ -99,13 +108,42 @@ public:
     static bool evaluateCondition(const Record& record, const TableSchema& schema,
                                    const Condition& condition);
 
+    // --- Index support (already implemented for you, except SELECT's use of it) ---
+
+    // Creates a B+Tree index over one INT column of a table, populated
+    // by scanning every existing row. Suggested message: "Index '<name>'
+    // created on <table>(<column>)."
+    ExecutionResult executeCreateIndex(CreateIndexStatement* stmt);
+
+    // Combines a table+column into the key used to look up indexes_.
+    static std::string indexKey(const std::string& tableName, const std::string& columnName);
+
+    // True if an index exists for this exact table+column - check this
+    // in executeSelect before deciding whether to use the index.
+    bool hasIndex(const std::string& tableName, const std::string& columnName) const;
+
 private:
     CatalogManager& catalog_;
     DiskManager& dataDisk_;
 
+    // Maps "table.column" -> its B+Tree.
+    std::unordered_map<std::string, BPlusTree> indexes_;
+    // Maps table name -> every column on that table that has an index,
+    // so UPDATE/DELETE know what to rebuild after rewriting a table.
+    std::unordered_map<std::string, std::vector<std::string>> indexedColumnsByTable_;
+
     // --- Already implemented for you (see Executor.cpp) ---
     ExecutionResult executeCreateTable(CreateTableStatement* stmt);
     ExecutionResult executeDropTable(DropTableStatement* stmt);
+
+    // Builds a fresh BPlusTree for tableName.columnName by scanning every
+    // existing row. Used by both executeCreateIndex and (after a table
+    // is rewritten) index maintenance following UPDATE/DELETE.
+    BPlusTree buildIndexFromScan(const std::string& tableName, const std::string& columnName);
+
+    // Rebuilds every index that exists on `tableName`, from scratch.
+    // Call this after rewriteTableRows() changes row locations.
+    void rebuildIndexesForTable(const std::string& tableName);
 
     // Reads every record across all of a table's data pages.
     static std::vector<Record> gatherAllRows(DiskManager& disk, const TableSchema& schema);

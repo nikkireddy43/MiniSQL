@@ -42,6 +42,7 @@ struct Condition {
 
 enum class StatementType {
     CREATE_TABLE,
+    CREATE_INDEX,
     INSERT,
     SELECT,
     UPDATE,
@@ -65,6 +66,14 @@ struct CreateTableStatement : Statement {
     CreateTableStatement() : Statement(StatementType::CREATE_TABLE) {}
     std::string tableName;
     std::vector<ColumnDefinition> columns;
+};
+
+// CREATE INDEX idx_id ON student(id);
+struct CreateIndexStatement : Statement {
+    CreateIndexStatement() : Statement(StatementType::CREATE_INDEX) {}
+    std::string indexName;
+    std::string tableName;
+    std::string columnName;
 };
 
 // INSERT INTO student VALUES(1, 'Nikki', 8.7);

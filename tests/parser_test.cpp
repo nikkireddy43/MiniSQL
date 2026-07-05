@@ -130,6 +130,25 @@ TEST(ParserTest, DropTableBasic) {
     EXPECT_EQ(drop->tableName, "student");
 }
 
+TEST(ParserTest, CreateIndexBasic) {
+    auto stmt = parse("CREATE INDEX idx_id ON student(id);");
+    ASSERT_EQ(stmt->type, StatementType::CREATE_INDEX);
+
+    auto* idx = static_cast<CreateIndexStatement*>(stmt.get());
+    EXPECT_EQ(idx->indexName, "idx_id");
+    EXPECT_EQ(idx->tableName, "student");
+    EXPECT_EQ(idx->columnName, "id");
+}
+
+TEST(ParserTest, CreateTableVsCreateIndexDisambiguation) {
+    // Both start with CREATE - make sure the parser looks ahead correctly.
+    auto tableStmt = parse("CREATE TABLE student(id INT);");
+    EXPECT_EQ(tableStmt->type, StatementType::CREATE_TABLE);
+
+    auto indexStmt = parse("CREATE INDEX idx_id ON student(id);");
+    EXPECT_EQ(indexStmt->type, StatementType::CREATE_INDEX);
+}
+
 TEST(ParserTest, MissingSemicolonThrows) {
     EXPECT_THROW(parse("DROP TABLE student"), ParseError);
 }

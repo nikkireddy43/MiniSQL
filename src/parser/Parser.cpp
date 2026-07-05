@@ -4,8 +4,6 @@ namespace minisql {
 
 Parser::Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {}
 
-// ---------- Token-level helpers (already implemented for you) ----------
-
 const Token& Parser::peek() const {
     return tokens_[pos_];
 }
@@ -39,14 +37,15 @@ const Token& Parser::consume(TokenType type, const std::string& message) {
     throw ParseError(message, peek().line);
 }
 
-// ---------- Statement dispatch (already implemented for you) ----------
-//
-// This is the "front door" - it looks at the leading token and hands off
-// to whichever parseX() method matches. You'll build the parseX() methods
-// themselves below.
-
 std::unique_ptr<Statement> Parser::parseStatement() {
-    if (check(TokenType::CREATE)) return parseCreateTable();
+    if (check(TokenType::CREATE)) {
+        // CREATE alone is ambiguous - look one token ahead to tell
+        // CREATE TABLE apart from CREATE INDEX.
+        if (pos_ + 1 < tokens_.size() && tokens_[pos_ + 1].type == TokenType::INDEX) {
+            return parseCreateIndex();
+        }
+        return parseCreateTable();
+    }
     if (check(TokenType::INSERT)) return parseInsert();
     if (check(TokenType::SELECT)) return parseSelect();
     if (check(TokenType::UPDATE)) return parseUpdate();
@@ -59,38 +58,44 @@ std::unique_ptr<Statement> Parser::parseStatement() {
         peek().line);
 }
 
-// ---------- Grammar rules (YOUR TURN - see Parser.h for the full grammar) ----------
-//
-// Suggested build order: parseDropTable (shortest) -> parseCreateTable ->
-// parseInsert -> parseDelete -> parseSelect -> parseUpdate.
-//
-// General pattern for all of these: consume() each required token in
-// sequence, in exactly the order the grammar rule lists them. consume()
-// throws automatically if something unexpected shows up, so you don't
-// need to write your own error checks - just call consume() for every
-// token the grammar requires, and use the returned Token's `.text` when
-// you need the actual value (e.g. a table name or column name).
-
 std::unique_ptr<CreateTableStatement> Parser::parseCreateTable() {
     consume(TokenType::CREATE, "Expected 'CREATE'");
     consume(TokenType::TABLE, "Expected 'TABLE' after 'CREATE'");
-    Token tableNameToken = consume(TokenType::IDENTIFIER, "Expected table name");  // renamed, no collision
-    consume(TokenType::LPAREN, "Expected '(' after table name");                  // fixed name
+    Token tableNameToken = consume(TokenType::IDENTIFIER, "Expected table name");
+    consume(TokenType::LPAREN, "Expected '(' after table name");
 
     auto stmt = std::make_unique<CreateTableStatement>();
     stmt->tableName = tableNameToken.text;
 
     while (true) {
-        stmt->columns.push_back(parseColumnDef());  // delegate name+type parsing
+        stmt->columns.push_back(parseColumnDef());
         if (match(TokenType::COMMA)) {
             continue;
         }
         break;
     }
 
-    consume(TokenType::RPAREN, "Expected ')' after column list");                 // fixed name
+    consume(TokenType::RPAREN, "Expected ')' after column list");
     consume(TokenType::SEMICOLON, "Expected ';' at end of statement");
 
+    return stmt;
+}
+
+std::unique_ptr<CreateIndexStatement> Parser::parseCreateIndex() {
+    consume(TokenType::CREATE, "Expected 'CREATE'");
+    consume(TokenType::INDEX, "Expected 'INDEX' after 'CREATE'");
+    Token indexNameToken = consume(TokenType::IDENTIFIER, "Expected index name");
+    consume(TokenType::ON, "Expected 'ON' after index name");
+    Token tableNameToken = consume(TokenType::IDENTIFIER, "Expected table name");
+    consume(TokenType::LPAREN, "Expected '(' after table name");
+    Token columnNameToken = consume(TokenType::IDENTIFIER, "Expected column name");
+    consume(TokenType::RPAREN, "Expected ')' after column name");
+    consume(TokenType::SEMICOLON, "Expected ';' at end of statement");
+
+    auto stmt = std::make_unique<CreateIndexStatement>();
+    stmt->indexName = indexNameToken.text;
+    stmt->tableName = tableNameToken.text;
+    stmt->columnName = columnNameToken.text;
     return stmt;
 }
 

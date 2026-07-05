@@ -53,6 +53,7 @@ public:
     // createTableStmt -> insertStmt -> deleteStmt -> selectStmt ->
     // updateStmt (longest, reuses condition + literal like the others).
     std::unique_ptr<CreateTableStatement> parseCreateTable();
+    std::unique_ptr<CreateIndexStatement> parseCreateIndex();
     std::unique_ptr<InsertStatement> parseInsert();
     std::unique_ptr<SelectStatement> parseSelect();
     std::unique_ptr<UpdateStatement> parseUpdate();

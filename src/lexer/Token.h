@@ -9,7 +9,7 @@ namespace minisql {
 enum class TokenType {
     // Keywords
     CREATE, TABLE, INSERT, INTO, VALUES, SELECT, FROM, WHERE,
-    UPDATE, SET, DELETE, DROP,
+    UPDATE, SET, DELETE, DROP, INDEX, ON,
 
     // Data types
     INT_TYPE, FLOAT_TYPE, TEXT_TYPE,

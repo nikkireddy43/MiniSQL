@@ -11,6 +11,8 @@ ExecutionResult Executor::execute(Statement* stmt) {
     switch (stmt->type) {
         case StatementType::CREATE_TABLE:
             return executeCreateTable(static_cast<CreateTableStatement*>(stmt));
+        case StatementType::CREATE_INDEX:
+            return executeCreateIndex(static_cast<CreateIndexStatement*>(stmt));
         case StatementType::INSERT:
             return executeInsert(static_cast<InsertStatement*>(stmt));
         case StatementType::SELECT:
@@ -87,6 +89,69 @@ void Executor::rewriteTableRows(CatalogManager& catalog, DiskManager& disk,
     }
 }
 
+// ---------- Index support (already implemented for you) ----------
+
+std::string Executor::indexKey(const std::string& tableName, const std::string& columnName) {
+    return tableName + "." + columnName;
+}
+
+bool Executor::hasIndex(const std::string& tableName, const std::string& columnName) const {
+    return indexes_.find(indexKey(tableName, columnName)) != indexes_.end();
+}
+
+BPlusTree Executor::buildIndexFromScan(const std::string& tableName, const std::string& columnName) {
+    const TableSchema& schema = catalog_.getTable(tableName);
+
+    size_t colIndex = schema.columns.size();
+    for (size_t i = 0; i < schema.columns.size(); i++) {
+        if (schema.columns[i].name == columnName) {
+            colIndex = i;
+            break;
+        }
+    }
+    if (colIndex == schema.columns.size()) {
+        throw ExecutionError("Unknown column for index: " + columnName);
+    }
+    if (schema.columns[colIndex].type != ColumnType::INT) {
+        throw ExecutionError("Indexes are only supported on INT columns (column '" +
+                              columnName + "' is not INT)");
+    }
+
+    BPlusTree tree;
+    for (int32_t pageId : schema.pageIds) {
+        Page page;
+        dataDisk_.readPage(pageId, page);
+        auto records = page.getAllRecords();
+        for (size_t recordIndex = 0; recordIndex < records.size(); recordIndex++) {
+            int32_t key = records[recordIndex][colIndex].intVal;
+            tree.insert(key, RowLocation{pageId, recordIndex});
+        }
+    }
+    return tree;
+}
+
+void Executor::rebuildIndexesForTable(const std::string& tableName) {
+    auto it = indexedColumnsByTable_.find(tableName);
+    if (it == indexedColumnsByTable_.end()) return;  // no indexes on this table
+
+    for (const std::string& columnName : it->second) {
+        indexes_[indexKey(tableName, columnName)] = buildIndexFromScan(tableName, columnName);
+    }
+}
+
+ExecutionResult Executor::executeCreateIndex(CreateIndexStatement* stmt) {
+    BPlusTree tree = buildIndexFromScan(stmt->tableName, stmt->columnName);
+    indexes_[indexKey(stmt->tableName, stmt->columnName)] = std::move(tree);
+    indexedColumnsByTable_[stmt->tableName].push_back(stmt->columnName);
+
+    ExecutionResult result;
+    result.message = "Index '" + stmt->indexName + "' created on " +
+                      stmt->tableName + "(" + stmt->columnName + ").";
+    return result;
+}
+
+// ---------- Core logic ----------
+
 ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
     const TableSchema& schema = catalog_.getTable(stmt->tableName);
 
@@ -97,17 +162,34 @@ ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
     }
 
     Page page;
-    const int32_t lastPageId = schema.pageIds.back();
-    dataDisk_.readPage(lastPageId, page);
+    int32_t targetPageId = schema.pageIds.back();
+    dataDisk_.readPage(targetPageId, page);
+    size_t newRecordIndex = page.numRecords();  // capture BEFORE appending
 
     if (page.appendRecord(record)) {
-        dataDisk_.writePage(lastPageId, page);
+        dataDisk_.writePage(targetPageId, page);
     } else {
-        const int32_t newPageId = dataDisk_.allocatePage();
+        targetPageId = dataDisk_.allocatePage();
         Page newPage;
+        newRecordIndex = 0;
         newPage.appendRecord(record);
-        dataDisk_.writePage(newPageId, newPage);
-        catalog_.addPageToTable(stmt->tableName, newPageId);
+        dataDisk_.writePage(targetPageId, newPage);
+        catalog_.addPageToTable(stmt->tableName, targetPageId);
+    }
+
+    // Keep any existing indexes on this table in sync incrementally,
+    // rather than rebuilding from scratch on every insert.
+    auto it = indexedColumnsByTable_.find(stmt->tableName);
+    if (it != indexedColumnsByTable_.end()) {
+        for (const std::string& columnName : it->second) {
+            size_t colIdx = 0;
+            for (; colIdx < schema.columns.size(); colIdx++) {
+                if (schema.columns[colIdx].name == columnName) break;
+            }
+            int32_t key = record[colIdx].intVal;
+            indexes_[indexKey(stmt->tableName, columnName)].insert(
+                key, RowLocation{targetPageId, newRecordIndex});
+        }
     }
 
     ExecutionResult result;
@@ -118,13 +200,26 @@ ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
 ExecutionResult Executor::executeSelect(SelectStatement* stmt) {
     const TableSchema& schema = catalog_.getTable(stmt->tableName);
 
-    std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
-
     std::vector<Record> matched;
-    for (const Record& row : allRows) {
-        if (!stmt->whereClause.has_value()
-            || evaluateCondition(row, schema, stmt->whereClause.value())) {
-            matched.push_back(row);
+
+    if (stmt->whereClause.has_value()
+        && stmt->whereClause->op == TokenType::EQUAL
+        && hasIndex(stmt->tableName, stmt->whereClause->column)) {
+        int32_t key = std::stoi(stmt->whereClause->value.text);
+        auto location = indexes_[indexKey(stmt->tableName, stmt->whereClause->column)].search(key);
+        if (location.has_value()) {
+            Page page;
+            dataDisk_.readPage(location->pageId, page);
+            auto records = page.getAllRecords();
+            matched.push_back(records[location->recordIndex]);
+        }
+    } else {
+        std::vector<Record> allRows = gatherAllRows(dataDisk_, schema);
+        for (const Record& row : allRows) {
+            if (!stmt->whereClause.has_value()
+                || evaluateCondition(row, schema, stmt->whereClause.value())) {
+                matched.push_back(row);
+            }
         }
     }
 
@@ -187,6 +282,7 @@ ExecutionResult Executor::executeUpdate(UpdateStatement* stmt) {
     }
 
     rewriteTableRows(catalog_, dataDisk_, stmt->tableName, allRows);
+    rebuildIndexesForTable(stmt->tableName);  // row locations changed - indexes are now stale
 
     ExecutionResult result;
     result.message = std::to_string(updatedCount) + " row(s) updated.";
@@ -206,6 +302,7 @@ ExecutionResult Executor::executeDelete(DeleteStatement* stmt) {
     }
 
     rewriteTableRows(catalog_, dataDisk_, stmt->tableName, toKeep);
+    rebuildIndexesForTable(stmt->tableName);  // row locations changed - indexes are now stale
 
     ExecutionResult result;
     result.message = std::to_string(allRows.size() - toKeep.size()) + " row(s) deleted.";

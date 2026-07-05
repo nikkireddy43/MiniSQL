@@ -16,6 +16,8 @@ std::string tokenTypeToString(TokenType type) {
         case TokenType::SET: return "SET";
         case TokenType::DELETE: return "DELETE";
         case TokenType::DROP: return "DROP";
+        case TokenType::INDEX: return "INDEX";
+        case TokenType::ON: return "ON";
         case TokenType::INT_TYPE: return "INT_TYPE";
         case TokenType::FLOAT_TYPE: return "FLOAT_TYPE";
         case TokenType::TEXT_TYPE: return "TEXT_TYPE";

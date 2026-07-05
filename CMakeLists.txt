@@ -48,6 +48,7 @@ add_executable(minisql_tests
     tests/catalog_test.cpp
     tests/executor_test.cpp
     tests/btree_test.cpp
+    tests/index_integration_test.cpp
 )
 target_link_libraries(minisql_tests PRIVATE minisql_core GTest::gtest_main)
 
