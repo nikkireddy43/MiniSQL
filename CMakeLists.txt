@@ -34,6 +34,7 @@ add_library(minisql_core
     src/executor/Executor.cpp
     src/index/BTree.cpp
     src/buffer/BufferPool.cpp
+    src/wal/WriteAheadLog.cpp
 )
 target_include_directories(minisql_core PUBLIC src)
 
@@ -52,6 +53,7 @@ add_executable(minisql_tests
     tests/index_integration_test.cpp
     tests/bufferpool_test.cpp
     tests/transaction_test.cpp
+    tests/wal_test.cpp
 )
 target_link_libraries(minisql_tests PRIVATE minisql_core GTest::gtest_main)
 
