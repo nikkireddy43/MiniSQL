@@ -32,6 +32,7 @@ add_library(minisql_core
     src/storage/DiskManager.cpp
     src/catalog/Catalog.cpp
     src/executor/Executor.cpp
+    src/index/BTree.cpp
 )
 target_include_directories(minisql_core PUBLIC src)
 
@@ -46,6 +47,7 @@ add_executable(minisql_tests
     tests/storage_test.cpp
     tests/catalog_test.cpp
     tests/executor_test.cpp
+    tests/btree_test.cpp
 )
 target_link_libraries(minisql_tests PRIVATE minisql_core GTest::gtest_main)
 
