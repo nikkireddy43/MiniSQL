@@ -33,6 +33,7 @@ add_library(minisql_core
     src/catalog/Catalog.cpp
     src/executor/Executor.cpp
     src/index/BTree.cpp
+    src/buffer/BufferPool.cpp
 )
 target_include_directories(minisql_core PUBLIC src)
 
@@ -49,6 +50,7 @@ add_executable(minisql_tests
     tests/executor_test.cpp
     tests/btree_test.cpp
     tests/index_integration_test.cpp
+    tests/bufferpool_test.cpp
 )
 target_link_libraries(minisql_tests PRIVATE minisql_core GTest::gtest_main)
 
