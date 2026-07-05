@@ -105,14 +105,17 @@ static void runBenchmark(Executor& executor) {
 }
 
 int main() {
-    CatalogManager catalog("minisql_catalog.db");
-    DiskManager dataDisk("minisql_data.db");
+    std::string catalogPath = "minisql_catalog.db";
+    std::string dataPath = "minisql_data.db";
+    CatalogManager catalog(catalogPath);
+    DiskManager dataDisk(dataPath);
     BufferPool bufferPool(dataDisk, /*poolSize=*/64);
-    Executor executor(catalog, bufferPool);
+    Executor executor(catalog, bufferPool, dataPath, catalogPath);
 
     std::cout << "MiniSQL v1\n";
-    std::cout << "Type SQL statements ending in ';', BENCHMARK to run the "
-                 "indexed-vs-scan benchmark, or EXIT to quit.\n";
+    std::cout << "Type SQL statements ending in ';' (including BEGIN/COMMIT/"
+                 "ROLLBACK), BENCHMARK to run the indexed-vs-scan benchmark, "
+                 "or EXIT to quit.\n";
 
     std::string line;
     std::string buffer;

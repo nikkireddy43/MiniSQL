@@ -56,6 +56,12 @@ public:
 
     std::vector<std::string> listTableNames() const;
 
+    // Discards all in-memory table metadata and reloads it fresh from
+    // disk. Used after a transaction ROLLBACK restores the catalog file
+    // to a prior snapshot - the in-memory tables_ map would otherwise
+    // still reflect the (now-undone) changes.
+    void reloadFromDisk();
+
     // Registers a newly-allocated data page as belonging to `tableName`,
     // and persists the change. Called by the Execution Engine whenever
     // it needs to allocate a new page for a table's rows (at CREATE TABLE

@@ -48,6 +48,9 @@ enum class StatementType {
     UPDATE,
     DELETE,
     DROP_TABLE,
+    BEGIN_TXN,
+    COMMIT_TXN,
+    ROLLBACK_TXN,
 };
 
 // Base class for every parsed statement. `type` lets calling code safely
@@ -113,6 +116,17 @@ struct DeleteStatement : Statement {
 struct DropTableStatement : Statement {
     DropTableStatement() : Statement(StatementType::DROP_TABLE) {}
     std::string tableName;
+};
+
+// BEGIN; / COMMIT; / ROLLBACK; - no fields needed, the type alone says it all.
+struct BeginStatement : Statement {
+    BeginStatement() : Statement(StatementType::BEGIN_TXN) {}
+};
+struct CommitStatement : Statement {
+    CommitStatement() : Statement(StatementType::COMMIT_TXN) {}
+};
+struct RollbackStatement : Statement {
+    RollbackStatement() : Statement(StatementType::ROLLBACK_TXN) {}
 };
 
 }  // namespace minisql

@@ -10,6 +10,7 @@ enum class TokenType {
     // Keywords
     CREATE, TABLE, INSERT, INTO, VALUES, SELECT, FROM, WHERE,
     UPDATE, SET, DELETE, DROP, INDEX, ON,
+    BEGIN_TXN, COMMIT_TXN, ROLLBACK_TXN,
 
     // Data types
     INT_TYPE, FLOAT_TYPE, TEXT_TYPE,

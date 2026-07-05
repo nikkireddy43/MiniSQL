@@ -18,6 +18,9 @@ std::string tokenTypeToString(TokenType type) {
         case TokenType::DROP: return "DROP";
         case TokenType::INDEX: return "INDEX";
         case TokenType::ON: return "ON";
+        case TokenType::BEGIN_TXN: return "BEGIN";
+        case TokenType::COMMIT_TXN: return "COMMIT";
+        case TokenType::ROLLBACK_TXN: return "ROLLBACK";
         case TokenType::INT_TYPE: return "INT_TYPE";
         case TokenType::FLOAT_TYPE: return "FLOAT_TYPE";
         case TokenType::TEXT_TYPE: return "TEXT_TYPE";

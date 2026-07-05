@@ -37,7 +37,8 @@ struct ExecutionResult {
 // would do it at scale, but a legitimate, explainable v1 tradeoff.
 class Executor {
 public:
-    Executor(CatalogManager& catalog, BufferPool& bufferPool);
+    Executor(CatalogManager& catalog, BufferPool& bufferPool,
+             std::string dataFilePath, std::string catalogFilePath);
 
     // Dispatches based on stmt->type to the matching executeX() method.
     ExecutionResult execute(Statement* stmt);
@@ -97,6 +98,26 @@ public:
     // nothing back at all - every row is deleted).
     ExecutionResult executeDelete(DeleteStatement* stmt);
 
+    // --- Transactions (BEGIN/COMMIT implemented for you, ROLLBACK is
+    //     the exercise - see the detailed guidance in Executor.cpp) ---
+
+    // Flushes the buffer pool (so the snapshot captures everything, not
+    // stale dirty pages still sitting in memory), then copies the live
+    // data file and catalog file to "<path>.snapshot" backups. Throws if
+    // a transaction is already in progress (no nesting supported).
+    ExecutionResult executeBegin(BeginStatement* stmt);
+
+    // Discards the snapshot files - the transaction's changes are already
+    // durable (every statement flushes eagerly), so there's nothing left
+    // to do but stop tracking the snapshot. Throws if no transaction is
+    // in progress.
+    ExecutionResult executeCommit(CommitStatement* stmt);
+
+    // THE EXERCISE. Restores the database to how it was at BEGIN. See
+    // the detailed guidance comment above this method's definition in
+    // Executor.cpp.
+    ExecutionResult executeRollback(RollbackStatement* stmt);
+
     // --- Helpers (already implemented for you) ---
 
     // Converts a parsed Literal (raw text, e.g. "8.7") into a typed Value,
@@ -125,6 +146,9 @@ public:
 private:
     CatalogManager& catalog_;
     BufferPool& bufferPool_;
+    std::string dataFilePath_;
+    std::string catalogFilePath_;
+    bool inTransaction_ = false;
 
     // Maps "table.column" -> its B+Tree.
     std::unordered_map<std::string, BPlusTree> indexes_;

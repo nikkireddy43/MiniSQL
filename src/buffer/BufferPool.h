@@ -93,6 +93,14 @@ public:
     bool isPageCached(int32_t pageId) const;
     size_t numFramesInUse() const;
 
+    // Drops every cached frame unconditionally, discarding any dirty
+    // data without writing it back. Used after a transaction ROLLBACK
+    // restores the underlying file to a prior snapshot - anything
+    // currently cached no longer matches what's on disk. Assumes no
+    // frames are currently pinned (true for this project's single-
+    // threaded, synchronous execution model).
+    void resetCache();
+
 private:
     DiskManager& diskManager_;
     size_t poolSize_;

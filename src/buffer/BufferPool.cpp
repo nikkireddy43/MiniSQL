@@ -9,8 +9,6 @@ BufferPool::BufferPool(DiskManager& diskManager, size_t poolSize)
     }
 }
 
-// ---------- LRU list bookkeeping (already implemented for you) ----------
-
 void BufferPool::removeFromLru(size_t frameIndex) {
     auto it = lruIterators_.find(frameIndex);
     if (it != lruIterators_.end()) {
@@ -24,11 +22,9 @@ void BufferPool::addToLru(size_t frameIndex) {
     lruIterators_[frameIndex] = std::prev(lruList_.end());
 }
 
-// ---------- Simple helpers (already implemented for you) ----------
-
 void BufferPool::flushPage(int32_t pageId) {
     auto it = pageTable_.find(pageId);
-    if (it == pageTable_.end()) return;  // not cached, nothing to flush
+    if (it == pageTable_.end()) return;
 
     Frame& frame = frames_[it->second];
     if (frame.dirty) {
@@ -52,10 +48,12 @@ size_t BufferPool::numFramesInUse() const {
     return frames_.size();
 }
 
-// ---------- Core logic (YOUR TURN - see BufferPool.h for detailed guidance) ----------
-//
-// Suggested build order: fetchPage -> unpinPage -> newPage (newPage is
-// short once fetchPage works, since it just allocates then delegates).
+void BufferPool::resetCache() {
+    frames_.clear();
+    pageTable_.clear();
+    lruList_.clear();
+    lruIterators_.clear();
+}
 
 Page* BufferPool::fetchPage(int32_t pageId) {
     auto it = pageTable_.find(pageId);

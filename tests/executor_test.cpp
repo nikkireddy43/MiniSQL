@@ -20,7 +20,7 @@ protected:
         catalog = std::make_unique<CatalogManager>(catalogFile);
         dataDisk = std::make_unique<DiskManager>(dataFile);
         bufferPool = std::make_unique<BufferPool>(*dataDisk, 64);
-        executor = std::make_unique<Executor>(*catalog, *bufferPool);
+        executor = std::make_unique<Executor>(*catalog, *bufferPool, dataFile, catalogFile);
     }
 
     void TearDown() override {
@@ -148,7 +148,7 @@ TEST_F(ExecutorTest, DataPersistsAcrossExecutorInstances) {
     catalog = std::make_unique<CatalogManager>(catalogFile);
     dataDisk = std::make_unique<DiskManager>(dataFile);
     bufferPool = std::make_unique<BufferPool>(*dataDisk, 64);
-    executor = std::make_unique<Executor>(*catalog, *bufferPool);
+    executor = std::make_unique<Executor>(*catalog, *bufferPool, dataFile, catalogFile);
 
     ExecutionResult result = run("SELECT * FROM student;");
     ASSERT_EQ(result.rows.size(), 1);

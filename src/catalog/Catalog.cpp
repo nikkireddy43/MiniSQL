@@ -50,6 +50,11 @@ std::vector<std::string> CatalogManager::listTableNames() const {
     return names;
 }
 
+void CatalogManager::reloadFromDisk() {
+    tables_.clear();
+    loadFromDisk();
+}
+
 Record CatalogManager::encodeSchema(const TableSchema& schema) {
     Record record;
     record.push_back(Value::makeText(schema.tableName));

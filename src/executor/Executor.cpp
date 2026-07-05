@@ -1,11 +1,15 @@
 #include "executor/Executor.h"
 
+#include <filesystem>
+
 #include "storage/Page.h"
 
 namespace minisql {
 
-Executor::Executor(CatalogManager& catalog, BufferPool& bufferPool)
-    : catalog_(catalog), bufferPool_(bufferPool) {}
+Executor::Executor(CatalogManager& catalog, BufferPool& bufferPool,
+                    std::string dataFilePath, std::string catalogFilePath)
+    : catalog_(catalog), bufferPool_(bufferPool),
+      dataFilePath_(std::move(dataFilePath)), catalogFilePath_(std::move(catalogFilePath)) {}
 
 ExecutionResult Executor::execute(Statement* stmt) {
     switch (stmt->type) {
@@ -23,6 +27,12 @@ ExecutionResult Executor::execute(Statement* stmt) {
             return executeDelete(static_cast<DeleteStatement*>(stmt));
         case StatementType::DROP_TABLE:
             return executeDropTable(static_cast<DropTableStatement*>(stmt));
+        case StatementType::BEGIN_TXN:
+            return executeBegin(static_cast<BeginStatement*>(stmt));
+        case StatementType::COMMIT_TXN:
+            return executeCommit(static_cast<CommitStatement*>(stmt));
+        case StatementType::ROLLBACK_TXN:
+            return executeRollback(static_cast<RollbackStatement*>(stmt));
     }
     throw ExecutionError("Unknown statement type");
 }
@@ -44,6 +54,108 @@ ExecutionResult Executor::executeDropTable(DropTableStatement* stmt) {
     catalog_.dropTable(stmt->tableName);
     ExecutionResult result;
     result.message = "Table '" + stmt->tableName + "' dropped.";
+    return result;
+}
+
+// ---------- Transactions ----------
+
+ExecutionResult Executor::executeBegin(BeginStatement*) {
+    if (inTransaction_) {
+        throw ExecutionError("A transaction is already in progress");
+    }
+
+    // Make sure everything currently in memory is actually on disk before
+    // we snapshot the files - otherwise the snapshot could miss recent
+    // dirty pages still sitting in the buffer pool.
+    bufferPool_.flushAllPages();
+
+    namespace fs = std::filesystem;
+    fs::copy_file(dataFilePath_, dataFilePath_ + ".snapshot",
+                   fs::copy_options::overwrite_existing);
+    fs::copy_file(catalogFilePath_, catalogFilePath_ + ".snapshot",
+                   fs::copy_options::overwrite_existing);
+
+    inTransaction_ = true;
+
+    ExecutionResult result;
+    result.message = "Transaction started.";
+    return result;
+}
+
+ExecutionResult Executor::executeCommit(CommitStatement*) {
+    if (!inTransaction_) {
+        throw ExecutionError("No transaction is in progress");
+    }
+
+    // Nothing to persist here - every statement already flushed eagerly
+    // as it ran. Committing just means "stop tracking the undo snapshot."
+    namespace fs = std::filesystem;
+    fs::remove(dataFilePath_ + ".snapshot");
+    fs::remove(catalogFilePath_ + ".snapshot");
+
+    inTransaction_ = false;
+
+    ExecutionResult result;
+    result.message = "Transaction committed.";
+    return result;
+}
+
+// THE EXERCISE. Undo everything since BEGIN by restoring the snapshot
+// files taken there, then making sure every in-memory structure that
+// might now be stale gets reset to match.
+//
+// Suggested approach, in this exact order (order matters here):
+//   1. If !inTransaction_, throw ExecutionError("No transaction is in
+//      progress") - same guard as executeCommit.
+//   2. Copy the snapshot files back OVER the live files:
+//        namespace fs = std::filesystem;
+//        fs::copy_file(dataFilePath_ + ".snapshot", dataFilePath_,
+//                       fs::copy_options::overwrite_existing);
+//        fs::copy_file(catalogFilePath_ + ".snapshot", catalogFilePath_,
+//                       fs::copy_options::overwrite_existing);
+//   3. Now the files on disk are back to how they were at BEGIN, but
+//      several things IN MEMORY still reflect the (now-undone) changes
+//      and would give wrong answers if left alone:
+//        - bufferPool_ may have cached pages that no longer match what's
+//          on disk -> call bufferPool_.resetCache().
+//        - catalog_'s in-memory table metadata still reflects the undone
+//          changes -> call catalog_.reloadFromDisk().
+//        - indexes_ and indexedColumnsByTable_ were built against data
+//          that may no longer exist in the same locations (or may not
+//          exist at all if a CREATE TABLE got rolled back) -> the
+//          simplest correct move is indexes_.clear() and
+//          indexedColumnsByTable_.clear(). (Documented limitation: any
+//          indexes created during the rolled-back transaction must be
+//          recreated manually afterward with CREATE INDEX - rebuilding
+//          them automatically is a reasonable improvement, not required
+//          to prove rollback works correctly.)
+//   4. Delete the now-consumed snapshot files (fs::remove, same paths as
+//      executeCommit) and set inTransaction_ = false.
+//   5. Return an ExecutionResult with a message like "Transaction rolled
+//      back."
+ExecutionResult Executor::executeRollback(RollbackStatement*) {
+    if (!inTransaction_) {
+        throw ExecutionError("No transaction is in progress");
+    }
+
+    namespace fs = std::filesystem;
+    fs::copy_file(dataFilePath_ + ".snapshot", dataFilePath_,
+                   fs::copy_options::overwrite_existing);
+    fs::copy_file(catalogFilePath_ + ".snapshot", catalogFilePath_,
+                   fs::copy_options::overwrite_existing);
+
+    bufferPool_.resetCache();
+    catalog_.reloadFromDisk();
+    indexes_.clear();
+    indexedColumnsByTable_.clear();
+
+    fs::remove(dataFilePath_ + ".snapshot");
+    fs::remove(catalogFilePath_ + ".snapshot");
+
+    inTransaction_ = false;
+
+    ExecutionResult result;
+    result.message = "Transaction rolled back.";
     return result;
 }
 

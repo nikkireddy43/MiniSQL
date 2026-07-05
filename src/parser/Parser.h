@@ -59,6 +59,9 @@ public:
     std::unique_ptr<UpdateStatement> parseUpdate();
     std::unique_ptr<DeleteStatement> parseDelete();
     std::unique_ptr<DropTableStatement> parseDropTable();
+    std::unique_ptr<BeginStatement> parseBegin();
+    std::unique_ptr<CommitStatement> parseCommit();
+    std::unique_ptr<RollbackStatement> parseRollback();
 
     // Shared helpers you'll call from the parseX() methods above:
 

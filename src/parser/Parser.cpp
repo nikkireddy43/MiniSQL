@@ -51,6 +51,9 @@ std::unique_ptr<Statement> Parser::parseStatement() {
     if (check(TokenType::UPDATE)) return parseUpdate();
     if (check(TokenType::DELETE)) return parseDelete();
     if (check(TokenType::DROP)) return parseDropTable();
+    if (check(TokenType::BEGIN_TXN)) return parseBegin();
+    if (check(TokenType::COMMIT_TXN)) return parseCommit();
+    if (check(TokenType::ROLLBACK_TXN)) return parseRollback();
 
     throw ParseError(
         "Expected a statement (CREATE, INSERT, SELECT, UPDATE, DELETE, or DROP), "
@@ -193,6 +196,24 @@ std::unique_ptr<DropTableStatement> Parser::parseDropTable() {
     auto stmt = std::make_unique<DropTableStatement>();
     stmt->tableName = tableNameToken.text;
     return stmt;
+}
+
+std::unique_ptr<BeginStatement> Parser::parseBegin() {
+    consume(TokenType::BEGIN_TXN, "Expected 'BEGIN'");
+    consume(TokenType::SEMICOLON, "Expected ';' after 'BEGIN'");
+    return std::make_unique<BeginStatement>();
+}
+
+std::unique_ptr<CommitStatement> Parser::parseCommit() {
+    consume(TokenType::COMMIT_TXN, "Expected 'COMMIT'");
+    consume(TokenType::SEMICOLON, "Expected ';' after 'COMMIT'");
+    return std::make_unique<CommitStatement>();
+}
+
+std::unique_ptr<RollbackStatement> Parser::parseRollback() {
+    consume(TokenType::ROLLBACK_TXN, "Expected 'ROLLBACK'");
+    consume(TokenType::SEMICOLON, "Expected ';' after 'ROLLBACK'");
+    return std::make_unique<RollbackStatement>();
 }
 
 ColumnDefinition Parser::parseColumnDef() {
