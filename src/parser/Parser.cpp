@@ -132,8 +132,16 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
         stmt->selectAll = true;
     } else {
         while (true) {
-            Token col = consume(TokenType::IDENTIFIER, "Expected column name");
-            stmt->columns.push_back(col.text);
+            SelectItem item = parseSelectItem();
+            stmt->selectItems.push_back(item);
+            if (item.aggFunc != AggregateFunc::NONE || item.isCountStar) {
+                stmt->hasAggregates = true;
+            } else if (item.tableName.empty()) {
+                // Plain unqualified column - also populate the pre-v3
+                // `columns` field so the original (non-join, non-aggregate)
+                // execution path keeps working exactly as it did before.
+                stmt->columns.push_back(item.columnName);
+            }
             if (match(TokenType::COMMA)) continue;
             break;
         }
@@ -143,12 +151,99 @@ std::unique_ptr<SelectStatement> Parser::parseSelect() {
     Token tableNameToken = consume(TokenType::IDENTIFIER, "Expected table name");
     stmt->tableName = tableNameToken.text;
 
+    // Optional JOIN clause: (INNER | LEFT)? JOIN table ON left.col = right.col
+    if (check(TokenType::INNER) || check(TokenType::LEFT) || check(TokenType::JOIN)) {
+        JoinClause join;
+        if (match(TokenType::LEFT)) {
+            join.isLeftJoin = true;
+        } else {
+            match(TokenType::INNER);  // optional, no-op either way
+        }
+        consume(TokenType::JOIN, "Expected 'JOIN'");
+        Token rightTableToken = consume(TokenType::IDENTIFIER, "Expected joined table name");
+        join.rightTable = rightTableToken.text;
+        consume(TokenType::ON, "Expected 'ON' after joined table name");
+
+        Token leftQualifier = consume(TokenType::IDENTIFIER, "Expected qualified column (table.column) in ON clause");
+        consume(TokenType::DOT, "Expected '.' after table name in ON clause");
+        Token leftCol = consume(TokenType::IDENTIFIER, "Expected column name after '.'");
+        consume(TokenType::EQUAL, "Expected '=' in ON clause");
+        Token rightQualifier = consume(TokenType::IDENTIFIER, "Expected qualified column (table.column) in ON clause");
+        consume(TokenType::DOT, "Expected '.' after table name in ON clause");
+        Token rightCol = consume(TokenType::IDENTIFIER, "Expected column name after '.'");
+
+        join.leftTable = leftQualifier.text;
+        join.leftColumn = leftCol.text;
+        // rightQualifier is expected to name join.rightTable - not enforced
+        // strictly here, the Executor resolves columns by table name anyway.
+        (void)rightQualifier;
+        join.rightColumn = rightCol.text;
+
+        stmt->join = join;
+    }
+
     if (match(TokenType::WHERE)) {
         stmt->whereClause = parseCondition();
     }
 
+    if (match(TokenType::GROUP)) {
+        consume(TokenType::BY, "Expected 'BY' after 'GROUP'");
+        Token groupCol = consume(TokenType::IDENTIFIER, "Expected column name after 'GROUP BY'");
+        stmt->groupByColumn = groupCol.text;
+    }
+
+    if (match(TokenType::ORDER)) {
+        consume(TokenType::BY, "Expected 'BY' after 'ORDER'");
+        Token orderCol = consume(TokenType::IDENTIFIER, "Expected column name after 'ORDER BY'");
+        OrderByClause orderBy;
+        orderBy.column = orderCol.text;
+        if (match(TokenType::DESC)) {
+            orderBy.descending = true;
+        } else {
+            match(TokenType::ASC);  // optional, default is ascending anyway
+        }
+        stmt->orderBy = orderBy;
+    }
+
     consume(TokenType::SEMICOLON, "Expected ';' at end of statement");
     return stmt;
+}
+
+// One item in a SELECT list: an aggregate call (COUNT(*)/SUM(col)/etc.)
+// or a plain column, optionally qualified with "table.".
+SelectItem Parser::parseSelectItem() {
+    SelectItem item;
+
+    AggregateFunc func = AggregateFunc::NONE;
+    if (match(TokenType::COUNT)) func = AggregateFunc::COUNT;
+    else if (match(TokenType::SUM)) func = AggregateFunc::SUM;
+    else if (match(TokenType::AVG)) func = AggregateFunc::AVG;
+    else if (match(TokenType::MIN)) func = AggregateFunc::MIN;
+    else if (match(TokenType::MAX)) func = AggregateFunc::MAX;
+
+    if (func != AggregateFunc::NONE) {
+        item.aggFunc = func;
+        consume(TokenType::LPAREN, "Expected '(' after aggregate function name");
+        if (match(TokenType::STAR)) {
+            item.isCountStar = true;
+        } else {
+            Token colToken = consume(TokenType::IDENTIFIER, "Expected column name in aggregate call");
+            item.columnName = colToken.text;
+        }
+        consume(TokenType::RPAREN, "Expected ')' after aggregate argument");
+        return item;
+    }
+
+    // Plain column, optionally qualified: IDENTIFIER ('.' IDENTIFIER)?
+    Token first = consume(TokenType::IDENTIFIER, "Expected column name");
+    if (match(TokenType::DOT)) {
+        Token second = consume(TokenType::IDENTIFIER, "Expected column name after '.'");
+        item.tableName = first.text;
+        item.columnName = second.text;
+    } else {
+        item.columnName = first.text;
+    }
+    return item;
 }
 
 std::unique_ptr<UpdateStatement> Parser::parseUpdate() {
@@ -251,6 +346,11 @@ Literal Parser::parseLiteral() {
 
 Condition Parser::parseCondition() {
     Token colToken = consume(TokenType::IDENTIFIER, "Expected column name in condition");
+    std::string columnName = colToken.text;
+    if (match(TokenType::DOT)) {
+        Token colToken2 = consume(TokenType::IDENTIFIER, "Expected column name after '.'");
+        columnName = colToken.text + "." + colToken2.text;
+    }
 
     TokenType op;
     if (match(TokenType::EQUAL)) op = TokenType::EQUAL;
@@ -262,7 +362,7 @@ Condition Parser::parseCondition() {
     else throw ParseError("Expected a comparison operator (=, !=, <, <=, >, >=)", peek().line);
 
     Literal value = parseLiteral();
-    return Condition{colToken.text, op, value};
+    return Condition{columnName, op, value};
 }
 
 }  // namespace minisql

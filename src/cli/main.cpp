@@ -1,4 +1,6 @@
+#include <cctype>
 #include <chrono>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -105,7 +107,47 @@ static void runBenchmark(Executor& executor) {
     std::cout << "(benchmark table dropped)\n\n";
 }
 
-int main() {
+// Runs every statement in a .sql file, in order, printing each result or
+// error as it goes. Statements are split on ';' the same way the REPL
+// buffers input - a known limitation this shares with the REPL: a ';'
+// inside a quoted string literal would be misread as a statement
+// terminator. Not handled here, consistent with the REPL's existing
+// scope.
+static void runScriptFile(Executor& executor, const std::string& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        std::cout << "Error: could not open script file: " << path << "\n";
+        return;
+    }
+    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+    size_t pos = 0;
+    while (pos < content.size()) {
+        size_t semi = content.find(';', pos);
+        if (semi == std::string::npos) break;
+        std::string stmtText = content.substr(pos, semi - pos + 1);  // include the ';'
+        pos = semi + 1;
+
+        bool isBlank = true;
+        for (char c : stmtText) {
+            if (!std::isspace(static_cast<unsigned char>(c)) && c != ';') { isBlank = false; break; }
+        }
+        if (isBlank) continue;
+
+        std::cout << "> " << stmtText << "\n";
+        try {
+            Lexer lexer(stmtText);
+            Parser parser(lexer.tokenize());
+            auto stmt = parser.parseStatement();
+            ExecutionResult result = executor.execute(stmt.get());
+            printResult(result);
+        } catch (const std::exception& e) {
+            std::cout << "Error: " << e.what() << "\n";
+        }
+    }
+}
+
+int main(int argc, char** argv) {
     std::string catalogPath = "minisql_catalog.db";
     std::string dataPath = "minisql_data.db";
     std::string walPath = "minisql.wal";
@@ -122,6 +164,15 @@ int main() {
     WriteAheadLog wal(walPath);
     BufferPool bufferPool(dataDisk, /*poolSize=*/64);
     Executor executor(catalog, bufferPool, wal, dataPath, catalogPath);
+
+    if (argc > 1) {
+        std::string scriptPath = argv[1];
+        std::cout << "Running script: " << scriptPath << "\n";
+        runScriptFile(executor, scriptPath);
+        executor.checkpoint();
+        std::cout << "Script complete.\n";
+        return 0;
+    }
 
     std::cout << "MiniSQL v1\n";
     std::cout << "Type SQL statements ending in ';' (including BEGIN/COMMIT/"

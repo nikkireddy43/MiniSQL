@@ -54,6 +54,7 @@ add_executable(minisql_tests
     tests/bufferpool_test.cpp
     tests/transaction_test.cpp
     tests/wal_test.cpp
+    tests/v3_test.cpp
 )
 target_link_libraries(minisql_tests PRIVATE minisql_core GTest::gtest_main)
 

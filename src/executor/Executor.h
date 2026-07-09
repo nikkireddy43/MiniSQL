@@ -191,6 +191,58 @@ private:
     // be sitting in those pages and would resurface on a later read.
     static void rewriteTableRows(CatalogManager& catalog, BufferPool& bufferPool, WriteAheadLog& wal,
                                   const std::string& tableName, const std::vector<Record>& rows);
+
+    // ---------- v3: joins, aggregates, sorting ----------
+    //
+    // KNOWN LIMITATION: aggregates combined with JOIN in the same query
+    // are not supported (throws ExecutionError) - a documented scope cut
+    // to keep each feature's logic independent rather than needing a
+    // combined join+group-by execution path.
+
+    // One row's worth of columns from each side of a join, tagged with
+    // which table each came from - used to resolve qualified ("table.col")
+    // or unqualified column references against the combined row.
+    struct JoinedSchema {
+        std::vector<std::pair<std::string, ColumnDefinition>> columns;  // (tableName, columnDef)
+    };
+
+    // Executes a SELECT with a JOIN clause: gathers both tables' rows,
+    // picks nested-loop or hash join based on a simple cardinality
+    // estimate (a basic cost-based decision), applies WHERE against the
+    // combined row, and projects the requested columns.
+    ExecutionResult executeSelectWithJoin(SelectStatement* stmt);
+
+    // Executes a SELECT with aggregate functions (COUNT/SUM/AVG/MIN/MAX),
+    // optionally grouped by one column. Every SELECT-list item must be an
+    // aggregate call in this scope - mixing in plain columns (other than
+    // implicitly via GROUP BY) throws ExecutionError.
+    ExecutionResult executeSelectWithAggregates(SelectStatement* stmt);
+
+    // Sorts result.rows in place by the column named in orderBy (matched
+    // against result.columnNames), ascending or descending.
+    static void sortResultRows(ExecutionResult& result, const OrderByClause& orderBy);
+
+    // Three-way comparison between two Values of the same underlying
+    // type: negative if a < b, 0 if equal, positive if a > b. A null
+    // Value (see Value::isNull) sorts as smaller than any non-null value.
+    static int compareValues(const Value& a, const Value& b);
+
+    // Computes one aggregate (COUNT(*)/COUNT(col)/SUM/AVG/MIN/MAX) over
+    // a group of rows, using `schema` to find item.columnName's index
+    // and declared type.
+    static Value computeAggregate(const std::vector<Record>& groupRows, const SelectItem& item,
+                                   const TableSchema& schema);
+
+    // Human-readable label for an aggregate SELECT item, e.g. "COUNT(*)"
+    // or "AVG(cg)" - used as the result column's header.
+    static std::string aggregateLabel(const SelectItem& item);
+
+    // Evaluates a WHERE condition against a combined (post-join) row.
+    // condition.column may be "table.column" (qualified) or a plain
+    // column name (resolved to the first matching column across both
+    // tables, in left-then-right order).
+    static bool evaluateConditionOnJoinedRow(const Record& row, const JoinedSchema& joinedSchema,
+                                              const Condition& condition);
 };
 
 }  // namespace minisql

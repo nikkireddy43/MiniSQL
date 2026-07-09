@@ -1,6 +1,9 @@
 #include "executor/Executor.h"
 
+#include <algorithm>
 #include <filesystem>
+#include <map>
+#include <unordered_map>
 
 #include "storage/Page.h"
 
@@ -346,6 +349,16 @@ ExecutionResult Executor::executeInsert(InsertStatement* stmt) {
 }
 
 ExecutionResult Executor::executeSelect(SelectStatement* stmt) {
+    if (stmt->join.has_value() && stmt->hasAggregates) {
+        throw ExecutionError("Aggregates combined with JOIN are not supported in this version");
+    }
+    if (stmt->join.has_value()) {
+        return executeSelectWithJoin(stmt);
+    }
+    if (stmt->hasAggregates) {
+        return executeSelectWithAggregates(stmt);
+    }
+
     const TableSchema& schema = catalog_.getTable(stmt->tableName);
 
     std::vector<Record> matched;
@@ -398,7 +411,390 @@ ExecutionResult Executor::executeSelect(SelectStatement* stmt) {
         }
     }
 
+    if (stmt->orderBy.has_value()) {
+        sortResultRows(result, stmt->orderBy.value());
+    }
+
     result.message = std::to_string(result.rows.size()) + " row(s) returned.";
+    return result;
+}
+
+// ---------- v3: comparison, sorting, aggregates, joins ----------
+
+int Executor::compareValues(const Value& a, const Value& b) {
+    if (a.isNull || b.isNull) {
+        if (a.isNull && b.isNull) return 0;
+        return a.isNull ? -1 : 1;  // null sorts as "smallest"
+    }
+    switch (a.type) {
+        case ValueType::INT:
+            return (a.intVal > b.intVal) - (a.intVal < b.intVal);
+        case ValueType::FLOAT:
+            return (a.floatVal > b.floatVal) - (a.floatVal < b.floatVal);
+        case ValueType::TEXT:
+            return a.textVal.compare(b.textVal);
+    }
+    return 0;
+}
+
+void Executor::sortResultRows(ExecutionResult& result, const OrderByClause& orderBy) {
+    size_t colIndex = result.columnNames.size();
+    for (size_t i = 0; i < result.columnNames.size(); i++) {
+        if (result.columnNames[i] == orderBy.column) {
+            colIndex = i;
+            break;
+        }
+    }
+    if (colIndex == result.columnNames.size()) {
+        // Fall back to matching just the part after the last '.' -
+        // convenient when column headers are qualified (e.g. "student.id")
+        // but ORDER BY was written unqualified.
+        for (size_t i = 0; i < result.columnNames.size(); i++) {
+            const std::string& header = result.columnNames[i];
+            size_t dotPos = header.rfind('.');
+            std::string unqualified = (dotPos == std::string::npos) ? header : header.substr(dotPos + 1);
+            if (unqualified == orderBy.column) {
+                colIndex = i;
+                break;
+            }
+        }
+    }
+    if (colIndex == result.columnNames.size()) {
+        throw ExecutionError("Unknown column in ORDER BY: " + orderBy.column);
+    }
+
+    std::sort(result.rows.begin(), result.rows.end(),
+              [colIndex, &orderBy](const Record& a, const Record& b) {
+                  int cmp = compareValues(a[colIndex], b[colIndex]);
+                  return orderBy.descending ? cmp > 0 : cmp < 0;
+              });
+}
+
+std::string Executor::aggregateLabel(const SelectItem& item) {
+    std::string funcName;
+    switch (item.aggFunc) {
+        case AggregateFunc::COUNT: funcName = "COUNT"; break;
+        case AggregateFunc::SUM: funcName = "SUM"; break;
+        case AggregateFunc::AVG: funcName = "AVG"; break;
+        case AggregateFunc::MIN: funcName = "MIN"; break;
+        case AggregateFunc::MAX: funcName = "MAX"; break;
+        case AggregateFunc::NONE: funcName = ""; break;
+    }
+    std::string arg = item.isCountStar ? "*" : item.columnName;
+    return funcName + "(" + arg + ")";
+}
+
+Value Executor::computeAggregate(const std::vector<Record>& groupRows, const SelectItem& item,
+                                  const TableSchema& schema) {
+    if (item.isCountStar) {
+        return Value::makeInt(static_cast<int32_t>(groupRows.size()));
+    }
+
+    size_t colIdx = schema.columns.size();
+    for (size_t i = 0; i < schema.columns.size(); i++) {
+        if (schema.columns[i].name == item.columnName) {
+            colIdx = i;
+            break;
+        }
+    }
+    if (colIdx == schema.columns.size()) {
+        throw ExecutionError("Unknown column in aggregate: " + item.columnName);
+    }
+    ColumnType colType = schema.columns[colIdx].type;
+
+    if (item.aggFunc == AggregateFunc::COUNT) {
+        return Value::makeInt(static_cast<int32_t>(groupRows.size()));
+    }
+
+    if (groupRows.empty()) {
+        if (item.aggFunc == AggregateFunc::SUM) {
+            return colType == ColumnType::FLOAT ? Value::makeFloat(0.0) : Value::makeInt(0);
+        }
+        if (item.aggFunc == AggregateFunc::AVG) {
+            return Value::makeFloat(0.0);
+        }
+        return Value::makeNull();  // MIN/MAX of an empty group is undefined
+    }
+
+    if (item.aggFunc == AggregateFunc::SUM || item.aggFunc == AggregateFunc::AVG) {
+        double total = 0.0;
+        for (const Record& row : groupRows) {
+            total += (colType == ColumnType::FLOAT) ? row[colIdx].floatVal
+                                                      : static_cast<double>(row[colIdx].intVal);
+        }
+        if (item.aggFunc == AggregateFunc::AVG) {
+            return Value::makeFloat(total / static_cast<double>(groupRows.size()));
+        }
+        return colType == ColumnType::FLOAT ? Value::makeFloat(total)
+                                             : Value::makeInt(static_cast<int32_t>(total));
+    }
+
+    // MIN / MAX
+    Value best = groupRows[0][colIdx];
+    for (size_t i = 1; i < groupRows.size(); i++) {
+        int cmp = compareValues(groupRows[i][colIdx], best);
+        if ((item.aggFunc == AggregateFunc::MIN && cmp < 0)
+            || (item.aggFunc == AggregateFunc::MAX && cmp > 0)) {
+            best = groupRows[i][colIdx];
+        }
+    }
+    return best;
+}
+
+ExecutionResult Executor::executeSelectWithAggregates(SelectStatement* stmt) {
+    for (const SelectItem& item : stmt->selectItems) {
+        if (item.aggFunc == AggregateFunc::NONE && !item.isCountStar) {
+            throw ExecutionError("Mixing plain columns with aggregates in SELECT is not supported "
+                                 "(the GROUP BY column is included automatically)");
+        }
+    }
+
+    const TableSchema& schema = catalog_.getTable(stmt->tableName);
+    std::vector<Record> allRows = gatherAllRows(bufferPool_, schema);
+
+    std::vector<Record> filtered;
+    for (const Record& row : allRows) {
+        if (!stmt->whereClause.has_value() || evaluateCondition(row, schema, stmt->whereClause.value())) {
+            filtered.push_back(row);
+        }
+    }
+
+    ExecutionResult result;
+
+    if (stmt->groupByColumn.has_value()) {
+        size_t groupColIdx = schema.columns.size();
+        for (size_t i = 0; i < schema.columns.size(); i++) {
+            if (schema.columns[i].name == stmt->groupByColumn.value()) {
+                groupColIdx = i;
+                break;
+            }
+        }
+        if (groupColIdx == schema.columns.size()) {
+            throw ExecutionError("Unknown column in GROUP BY: " + stmt->groupByColumn.value());
+        }
+
+        // Group by a string key derived from the value - works uniformly
+        // for INT/FLOAT/TEXT. std::map keeps groups in a deterministic,
+        // sorted-by-key order.
+        std::map<std::string, std::pair<Value, std::vector<Record>>> groups;
+        for (const Record& row : filtered) {
+            const Value& groupVal = row[groupColIdx];
+            std::string key = (groupVal.type == ValueType::INT) ? std::to_string(groupVal.intVal)
+                             : (groupVal.type == ValueType::FLOAT) ? std::to_string(groupVal.floatVal)
+                                                                    : groupVal.textVal;
+            auto it = groups.find(key);
+            if (it == groups.end()) {
+                groups[key] = {groupVal, {row}};
+            } else {
+                it->second.second.push_back(row);
+            }
+        }
+
+        result.columnNames.push_back(stmt->groupByColumn.value());
+        for (const SelectItem& item : stmt->selectItems) {
+            result.columnNames.push_back(aggregateLabel(item));
+        }
+
+        for (const auto& [key, groupData] : groups) {
+            (void)key;
+            Record outRow;
+            outRow.push_back(groupData.first);
+            for (const SelectItem& item : stmt->selectItems) {
+                outRow.push_back(computeAggregate(groupData.second, item, schema));
+            }
+            result.rows.push_back(std::move(outRow));
+        }
+    } else {
+        for (const SelectItem& item : stmt->selectItems) {
+            result.columnNames.push_back(aggregateLabel(item));
+        }
+        Record outRow;
+        for (const SelectItem& item : stmt->selectItems) {
+            outRow.push_back(computeAggregate(filtered, item, schema));
+        }
+        result.rows.push_back(std::move(outRow));
+    }
+
+    if (stmt->orderBy.has_value()) {
+        sortResultRows(result, stmt->orderBy.value());
+    }
+
+    result.message = std::to_string(result.rows.size()) + " row(s) returned.";
+    return result;
+}
+
+bool Executor::evaluateConditionOnJoinedRow(const Record& row, const JoinedSchema& joinedSchema,
+                                             const Condition& condition) {
+    std::string wantTable, wantColumn = condition.column;
+    size_t dotPos = condition.column.find('.');
+    if (dotPos != std::string::npos) {
+        wantTable = condition.column.substr(0, dotPos);
+        wantColumn = condition.column.substr(dotPos + 1);
+    }
+
+    int colIndex = -1;
+    ColumnType colType = ColumnType::TEXT;
+    for (size_t i = 0; i < joinedSchema.columns.size(); i++) {
+        const auto& [tableName, colDef] = joinedSchema.columns[i];
+        bool tableMatches = wantTable.empty() || tableName == wantTable;
+        if (tableMatches && colDef.name == wantColumn) {
+            colIndex = static_cast<int>(i);
+            colType = colDef.type;
+            break;
+        }
+    }
+    if (colIndex == -1) {
+        throw ExecutionError("Unknown column in WHERE clause: " + condition.column);
+    }
+
+    const Value& fieldValue = row[static_cast<size_t>(colIndex)];
+    Value compareValue = Executor::literalToValue(condition.value, colType);
+    int cmp = Executor::compareValues(fieldValue, compareValue);
+
+    switch (condition.op) {
+        case TokenType::EQUAL: return cmp == 0;
+        case TokenType::NOT_EQUAL: return cmp != 0;
+        case TokenType::LESS: return cmp < 0;
+        case TokenType::LESS_EQUAL: return cmp <= 0;
+        case TokenType::GREATER: return cmp > 0;
+        case TokenType::GREATER_EQUAL: return cmp >= 0;
+        default: throw ExecutionError("Unsupported operator in WHERE clause");
+    }
+}
+
+ExecutionResult Executor::executeSelectWithJoin(SelectStatement* stmt) {
+    const JoinClause& join = stmt->join.value();
+    const TableSchema& leftSchema = catalog_.getTable(stmt->tableName);
+    const TableSchema& rightSchema = catalog_.getTable(join.rightTable);
+
+    size_t leftColIdx = leftSchema.columns.size();
+    for (size_t i = 0; i < leftSchema.columns.size(); i++) {
+        if (leftSchema.columns[i].name == join.leftColumn) { leftColIdx = i; break; }
+    }
+    size_t rightColIdx = rightSchema.columns.size();
+    for (size_t i = 0; i < rightSchema.columns.size(); i++) {
+        if (rightSchema.columns[i].name == join.rightColumn) { rightColIdx = i; break; }
+    }
+    if (leftColIdx == leftSchema.columns.size() || rightColIdx == rightSchema.columns.size()) {
+        throw ExecutionError("Unknown column in JOIN ON clause");
+    }
+
+    std::vector<Record> leftRows = gatherAllRows(bufferPool_, leftSchema);
+    std::vector<Record> rightRows = gatherAllRows(bufferPool_, rightSchema);
+
+    JoinedSchema joinedSchema;
+    for (const auto& col : leftSchema.columns) joinedSchema.columns.push_back({stmt->tableName, col});
+    for (const auto& col : rightSchema.columns) joinedSchema.columns.push_back({join.rightTable, col});
+    size_t rightWidth = rightSchema.columns.size();
+
+    // Simple cost-based decision: hash join scales better than nested
+    // loop once both sides are reasonably large, but LEFT JOIN keeps its
+    // unmatched-row bookkeeping simpler with nested loop, so we restrict
+    // hash join to INNER JOIN here.
+    bool useHashJoin = !join.isLeftJoin && leftRows.size() > 50 && rightRows.size() > 50;
+
+    std::vector<Record> joined;
+
+    if (useHashJoin) {
+        // Build the hash table on whichever side is smaller.
+        bool buildOnLeft = leftRows.size() <= rightRows.size();
+        const std::vector<Record>& buildRows = buildOnLeft ? leftRows : rightRows;
+        size_t buildColIdx = buildOnLeft ? leftColIdx : rightColIdx;
+
+        std::unordered_map<std::string, std::vector<size_t>> hashTable;
+        for (size_t i = 0; i < buildRows.size(); i++) {
+            const Value& v = buildRows[i][buildColIdx];
+            std::string key = (v.type == ValueType::INT) ? std::to_string(v.intVal)
+                             : (v.type == ValueType::FLOAT) ? std::to_string(v.floatVal) : v.textVal;
+            hashTable[key].push_back(i);
+        }
+
+        const std::vector<Record>& probeRows = buildOnLeft ? rightRows : leftRows;
+        size_t probeColIdx = buildOnLeft ? rightColIdx : leftColIdx;
+
+        for (const Record& probeRow : probeRows) {
+            const Value& v = probeRow[probeColIdx];
+            std::string key = (v.type == ValueType::INT) ? std::to_string(v.intVal)
+                             : (v.type == ValueType::FLOAT) ? std::to_string(v.floatVal) : v.textVal;
+            auto it = hashTable.find(key);
+            if (it == hashTable.end()) continue;
+            for (size_t buildIdx : it->second) {
+                Record combined;
+                const Record& leftRow = buildOnLeft ? buildRows[buildIdx] : probeRow;
+                const Record& rightRow = buildOnLeft ? probeRow : buildRows[buildIdx];
+                combined.insert(combined.end(), leftRow.begin(), leftRow.end());
+                combined.insert(combined.end(), rightRow.begin(), rightRow.end());
+                joined.push_back(std::move(combined));
+            }
+        }
+    } else {
+        // Nested loop join - also handles LEFT JOIN's unmatched rows.
+        for (const Record& leftRow : leftRows) {
+            bool matchedAny = false;
+            for (const Record& rightRow : rightRows) {
+                if (compareValues(leftRow[leftColIdx], rightRow[rightColIdx]) == 0) {
+                    matchedAny = true;
+                    Record combined;
+                    combined.insert(combined.end(), leftRow.begin(), leftRow.end());
+                    combined.insert(combined.end(), rightRow.begin(), rightRow.end());
+                    joined.push_back(std::move(combined));
+                }
+            }
+            if (!matchedAny && join.isLeftJoin) {
+                Record combined;
+                combined.insert(combined.end(), leftRow.begin(), leftRow.end());
+                for (size_t i = 0; i < rightWidth; i++) combined.push_back(Value::makeNull());
+                joined.push_back(std::move(combined));
+            }
+        }
+    }
+
+    std::vector<Record> matched;
+    for (const Record& row : joined) {
+        if (!stmt->whereClause.has_value()
+            || evaluateConditionOnJoinedRow(row, joinedSchema, stmt->whereClause.value())) {
+            matched.push_back(row);
+        }
+    }
+
+    ExecutionResult result;
+    if (stmt->selectAll) {
+        for (const auto& [tableName, colDef] : joinedSchema.columns) {
+            result.columnNames.push_back(tableName + "." + colDef.name);
+        }
+        result.rows = std::move(matched);
+    } else {
+        for (const SelectItem& item : stmt->selectItems) {
+            result.columnNames.push_back(item.tableName.empty() ? item.columnName
+                                                                   : item.tableName + "." + item.columnName);
+        }
+        for (const Record& row : matched) {
+            Record projected;
+            for (const SelectItem& item : stmt->selectItems) {
+                int colIndex = -1;
+                for (size_t i = 0; i < joinedSchema.columns.size(); i++) {
+                    const auto& [tableName, colDef] = joinedSchema.columns[i];
+                    bool tableMatches = item.tableName.empty() || tableName == item.tableName;
+                    if (tableMatches && colDef.name == item.columnName) {
+                        colIndex = static_cast<int>(i);
+                        break;
+                    }
+                }
+                if (colIndex == -1) {
+                    throw ExecutionError("Unknown column in SELECT: " + item.columnName);
+                }
+                projected.push_back(row[static_cast<size_t>(colIndex)]);
+            }
+            result.rows.push_back(std::move(projected));
+        }
+    }
+
+    if (stmt->orderBy.has_value()) {
+        sortResultRows(result, stmt->orderBy.value());
+    }
+
+    std::string strategy = useHashJoin ? "hash join" : "nested loop join";
+    result.message = std::to_string(result.rows.size()) + " row(s) returned (used " + strategy + ").";
     return result;
 }
 

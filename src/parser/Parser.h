@@ -75,6 +75,11 @@ public:
     // Call this AFTER consuming the WHERE keyword.
     Condition parseCondition();
 
+    // v3: parses one SELECT-list item - either an aggregate call
+    // (COUNT(*)/SUM(col)/AVG(col)/MIN(col)/MAX(col)) or a plain,
+    // optionally table-qualified column ("id" or "student.id").
+    SelectItem parseSelectItem();
+
 private:
     std::vector<Token> tokens_;
     size_t pos_ = 0;

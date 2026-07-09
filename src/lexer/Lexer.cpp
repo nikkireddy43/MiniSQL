@@ -25,6 +25,19 @@ Lexer::Lexer(std::string source) : source_(std::move(source)) {
         {"begin", TokenType::BEGIN_TXN},
         {"commit", TokenType::COMMIT_TXN},
         {"rollback", TokenType::ROLLBACK_TXN},
+        {"join", TokenType::JOIN},
+        {"inner", TokenType::INNER},
+        {"left", TokenType::LEFT},
+        {"group", TokenType::GROUP},
+        {"by", TokenType::BY},
+        {"order", TokenType::ORDER},
+        {"asc", TokenType::ASC},
+        {"desc", TokenType::DESC},
+        {"count", TokenType::COUNT},
+        {"sum", TokenType::SUM},
+        {"avg", TokenType::AVG},
+        {"min", TokenType::MIN},
+        {"max", TokenType::MAX},
         {"int", TokenType::INT_TYPE},
         {"float", TokenType::FLOAT_TYPE},
         {"text", TokenType::TEXT_TYPE},
@@ -50,6 +63,7 @@ std::vector<Token> Lexer::tokenize() {
         if (c == ',') { advance(); tokens.emplace_back(TokenType::COMMA, ",", line_); continue; }
         if (c == ';') { advance(); tokens.emplace_back(TokenType::SEMICOLON, ";", line_); continue; }
         if (c == '*') { advance(); tokens.emplace_back(TokenType::STAR, "*", line_); continue; }
+        if (c == '.') { advance(); tokens.emplace_back(TokenType::DOT, ".", line_); continue; }
         if (c == '=') { advance(); tokens.emplace_back(TokenType::EQUAL, "=", line_); continue; }
 
         if (c == '<') {

@@ -19,6 +19,14 @@ struct Value {
     int32_t intVal = 0;
     double floatVal = 0.0;
     std::string textVal;
+    bool isNull = false;  // true for unmatched LEFT JOIN columns
+
+    static Value makeNull() {
+        Value val;
+        val.type = ValueType::TEXT;
+        val.isNull = true;
+        return val;
+    }
 
     static Value makeInt(int32_t v) {
         Value val;

@@ -21,6 +21,19 @@ std::string tokenTypeToString(TokenType type) {
         case TokenType::BEGIN_TXN: return "BEGIN";
         case TokenType::COMMIT_TXN: return "COMMIT";
         case TokenType::ROLLBACK_TXN: return "ROLLBACK";
+        case TokenType::JOIN: return "JOIN";
+        case TokenType::INNER: return "INNER";
+        case TokenType::LEFT: return "LEFT";
+        case TokenType::GROUP: return "GROUP";
+        case TokenType::BY: return "BY";
+        case TokenType::ORDER: return "ORDER";
+        case TokenType::ASC: return "ASC";
+        case TokenType::DESC: return "DESC";
+        case TokenType::COUNT: return "COUNT";
+        case TokenType::SUM: return "SUM";
+        case TokenType::AVG: return "AVG";
+        case TokenType::MIN: return "MIN";
+        case TokenType::MAX: return "MAX";
         case TokenType::INT_TYPE: return "INT_TYPE";
         case TokenType::FLOAT_TYPE: return "FLOAT_TYPE";
         case TokenType::TEXT_TYPE: return "TEXT_TYPE";
@@ -33,6 +46,7 @@ std::string tokenTypeToString(TokenType type) {
         case TokenType::COMMA: return "COMMA";
         case TokenType::SEMICOLON: return "SEMICOLON";
         case TokenType::STAR: return "STAR";
+        case TokenType::DOT: return "DOT";
         case TokenType::EQUAL: return "EQUAL";
         case TokenType::NOT_EQUAL: return "NOT_EQUAL";
         case TokenType::LESS: return "LESS";

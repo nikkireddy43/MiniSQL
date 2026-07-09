@@ -38,6 +38,33 @@ struct Condition {
     Literal value;
 };
 
+// ---------- v3: joins, aggregates, ordering ----------
+
+enum class AggregateFunc { NONE, COUNT, SUM, AVG, MIN, MAX };
+
+// One item in a SELECT list: either a plain (optionally table-qualified)
+// column, or an aggregate call like COUNT(*) / SUM(cg).
+struct SelectItem {
+    std::string tableName;   // qualifier, e.g. "student" in "student.id" - empty if unqualified
+    std::string columnName;  // empty when isCountStar is true
+    AggregateFunc aggFunc = AggregateFunc::NONE;
+    bool isCountStar = false;
+};
+
+// INNER/LEFT JOIN otherTable ON left.col = right.col
+struct JoinClause {
+    std::string rightTable;
+    std::string leftTable;
+    std::string leftColumn;
+    std::string rightColumn;
+    bool isLeftJoin = false;
+};
+
+struct OrderByClause {
+    std::string column;
+    bool descending = false;
+};
+
 // ---------- Statement base ----------
 
 enum class StatementType {
@@ -88,12 +115,22 @@ struct InsertStatement : Statement {
 
 // SELECT * FROM student WHERE id = 5;
 // SELECT id, name FROM student;
+// SELECT s.id, c.code FROM s JOIN c ON s.id = c.studentId;
+// SELECT COUNT(*), AVG(cg) FROM student GROUP BY major;
 struct SelectStatement : Statement {
     SelectStatement() : Statement(StatementType::SELECT) {}
     std::string tableName;
     bool selectAll = false;             // true for SELECT *
-    std::vector<std::string> columns;   // used when selectAll is false
+    std::vector<std::string> columns;   // simple case (no join/aggregates): plain column names
     std::optional<Condition> whereClause;
+
+    // v3 additions - all optional, default-constructed to "not present"
+    // so every pre-v3 query behaves exactly as it did before.
+    std::vector<SelectItem> selectItems;  // populated for joins/aggregates (qualified/aggregate select list)
+    bool hasAggregates = false;
+    std::optional<JoinClause> join;
+    std::optional<std::string> groupByColumn;
+    std::optional<OrderByClause> orderBy;
 };
 
 // UPDATE student SET cg = 9.0 WHERE id = 5;
